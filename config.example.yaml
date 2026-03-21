@@ -1,0 +1,4 @@
+orgs:
+  - mycompany
+  - other-org
+poll_interval: "30s"
