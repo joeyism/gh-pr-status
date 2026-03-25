@@ -19,6 +19,8 @@ type prsFetchedMsg struct {
 }
 
 type commentPostedMsg struct{ err error }
+type prClosedMsg struct{ err error }
+type prMergedMsg struct{ err error }
 
 type clearFlashMsg struct{}
 
@@ -36,11 +38,11 @@ type model struct {
 	changedAt      map[int]time.Time
 	previousStatus map[int]string
 
-	focused    bool
-	confirming bool
-	flash      string
-	width      int
-	height     int
+	focused       bool
+	confirmAction string // "cursor" | "close" | "merge" | "" (none)
+	flash         string
+	width         int
+	height        int
 
 	client   *githubv4.Client
 	username string
@@ -80,14 +82,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		// When the confirmation overlay is open, intercept all keys.
-		if m.confirming {
+		if m.confirmAction != "" {
 			switch msg.String() {
 			case "y", "enter":
-				m.confirming = false
+				action := m.confirmAction
+				m.confirmAction = ""
 				pr := m.prs[m.cursor]
-				return m, m.addCommentCmd(pr.ID, "@cursor review")
+				switch action {
+				case "cursor":
+					return m, m.addCommentCmd(pr.ID, "@cursor review")
+				case "close":
+					return m, m.closePRCmd(pr.ID)
+				case "merge":
+					return m, m.mergePRCmd(pr.ID)
+				}
 			case "n", "esc":
-				m.confirming = false
+				m.confirmAction = ""
 			}
 			return m, nil
 		}
@@ -114,7 +124,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "c":
 			if len(m.prs) > 0 {
-				m.confirming = true
+				m.confirmAction = "cursor"
+			}
+		case "x":
+			if len(m.prs) > 0 {
+				m.confirmAction = "close"
+			}
+		case "m":
+			if len(m.prs) > 0 {
+				m.confirmAction = "merge"
 			}
 		case "r":
 			if !m.fetching {
@@ -130,6 +148,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flash = flashSuccessMsg.Render("Comment posted ✓")
 		}
 		return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
+
+	case prClosedMsg:
+		if msg.err != nil {
+			m.flash = flashFailureMsg.Render(fmt.Sprintf("Error closing PR: %v", msg.err))
+			return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
+		}
+		m.flash = flashSuccessMsg.Render("PR closed ✓")
+		m.fetching = true
+		return m, tea.Batch(
+			tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} }),
+			m.fetchPRsCmd(),
+		)
+
+	case prMergedMsg:
+		if msg.err != nil {
+			m.flash = flashFailureMsg.Render(fmt.Sprintf("Error merging PR: %v", msg.err))
+			return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
+		}
+		m.flash = flashSuccessMsg.Render("PR merged ✓")
+		m.fetching = true
+		return m, tea.Batch(
+			tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} }),
+			m.fetchPRsCmd(),
+		)
 
 	case prsFetchedMsg:
 		m.fetching = false
@@ -283,7 +325,7 @@ func (m model) View() string {
 		flashLine = "\n" + m.flash
 	}
 	b.WriteString(footerStyle.Render(fmt.Sprintf(
-		"\n%s%s%s                    j/k: nav • tab: expand • o: open • r: refresh • c: cursor review • q: quit",
+		"\n%s%s%s                    j/k: nav • tab: expand • o: open • r: refresh • c: cursor review • x: close • m: merge • q: quit",
 		ago, fetchIndicator, flashLine,
 	)))
 
@@ -309,15 +351,30 @@ func (m model) View() string {
 		Height(innerH).
 		Render(out)
 
-	if m.confirming && len(m.prs) > 0 {
+	if m.confirmAction != "" && len(m.prs) > 0 {
 		pr := m.prs[m.cursor]
 		title := pr.Title
 		if len(title) > 40 {
 			title = title[:39] + "…"
 		}
-		question := overlayTextStyle.Render("Request @cursor review on")
+
+		var questionText string
+		var yesBtnColor lipgloss.Color
+		switch m.confirmAction {
+		case "close":
+			questionText = "Close pull request"
+			yesBtnColor = lipgloss.Color("#FF5555")
+		case "merge":
+			questionText = "Squash and merge"
+			yesBtnColor = lipgloss.Color("#50FA7B")
+		default: // "cursor"
+			questionText = "Request @cursor review on"
+			yesBtnColor = lipgloss.Color("#50FA7B")
+		}
+
+		question := overlayTextStyle.Render(questionText)
 		prInfo := overlayTextStyle.Bold(true).Render(fmt.Sprintf("%q (#%d)?", title, pr.Number))
-		yesBtn := overlayTextStyle.Bold(true).Foreground(lipgloss.Color("#50FA7B")).Render("[y]es")
+		yesBtn := overlayTextStyle.Bold(true).Foreground(yesBtnColor).Render("[y]es")
 		noBtn := overlayTextStyle.Bold(true).Foreground(lipgloss.Color("#FF5555")).Render("[n]o")
 		buttons := yesBtn + "    " + noBtn
 
@@ -424,6 +481,22 @@ func (m model) addCommentCmd(subjectID, body string) tea.Cmd {
 	return func() tea.Msg {
 		err := addPRComment(context.Background(), client, subjectID, body)
 		return commentPostedMsg{err: err}
+	}
+}
+
+func (m model) closePRCmd(prID string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		err := closePR(context.Background(), client, prID)
+		return prClosedMsg{err: err}
+	}
+}
+
+func (m model) mergePRCmd(prID string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		err := mergePR(context.Background(), client, prID)
+		return prMergedMsg{err: err}
 	}
 }
 

@@ -213,6 +213,36 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 	return prs, nil
 }
 
+func closePR(ctx context.Context, client *githubv4.Client, prID string) error {
+	var m struct {
+		ClosePullRequest struct {
+			PullRequest struct {
+				State githubv4.String
+			}
+		} `graphql:"closePullRequest(input:$input)"`
+	}
+	input := githubv4.ClosePullRequestInput{
+		PullRequestID: githubv4.ID(prID),
+	}
+	return client.Mutate(ctx, &m, input, nil)
+}
+
+func mergePR(ctx context.Context, client *githubv4.Client, prID string) error {
+	var m struct {
+		MergePullRequest struct {
+			PullRequest struct {
+				State githubv4.String
+			}
+		} `graphql:"mergePullRequest(input:$input)"`
+	}
+	squash := githubv4.PullRequestMergeMethodSquash
+	input := githubv4.MergePullRequestInput{
+		PullRequestID: githubv4.ID(prID),
+		MergeMethod:   &squash,
+	}
+	return client.Mutate(ctx, &m, input, nil)
+}
+
 func addPRComment(ctx context.Context, client *githubv4.Client, subjectID, body string) error {
 	var m struct {
 		AddComment struct {
