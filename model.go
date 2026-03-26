@@ -21,6 +21,7 @@ type prsFetchedMsg struct {
 type commentPostedMsg struct{ err error }
 type prClosedMsg struct{ err error }
 type prMergedMsg struct{ err error }
+type clipboardMsg struct{ err error }
 
 type clearFlashMsg struct{}
 
@@ -139,6 +140,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fetching = true
 				return m, m.fetchPRsCmd()
 			}
+		case "y":
+			if len(m.prs) > 0 {
+				return m, copyToClipboardCmd(m.prs[m.cursor].URL)
+			}
 		}
 
 	case commentPostedMsg:
@@ -172,6 +177,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} }),
 			m.fetchPRsCmd(),
 		)
+
+	case clipboardMsg:
+		if msg.err != nil {
+			m.flash = flashFailureMsg.Render(fmt.Sprintf("Copy failed: %v", msg.err))
+		} else {
+			m.flash = flashSuccessMsg.Render("URL copied ✓")
+		}
+		return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
 
 	case prsFetchedMsg:
 		m.fetching = false
@@ -325,7 +338,7 @@ func (m model) View() string {
 		flashLine = "\n" + m.flash
 	}
 	b.WriteString(footerStyle.Render(fmt.Sprintf(
-		"\n%s%s%s                    j/k: nav • tab: expand • o: open • r: refresh • c: cursor review • x: close • m: merge • q: quit",
+		"\n%s%s%s                    j/k: nav • tab: expand • o: open • y: yank • r: refresh • c: cursor review • x: close • m: merge • q: quit",
 		ago, fetchIndicator, flashLine,
 	)))
 
@@ -533,4 +546,27 @@ func openBrowser(url string) {
 		cmd = exec.Command("open", url)
 	}
 	_ = cmd.Start()
+}
+
+func clipboardCommand(goos string) (string, []string, error) {
+	switch goos {
+	case "darwin":
+		return "pbcopy", nil, nil
+	case "linux":
+		return "xclip", []string{"-selection", "clipboard"}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported OS: %s", goos)
+	}
+}
+
+func copyToClipboardCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		name, args, err := clipboardCommand(runtime.GOOS)
+		if err != nil {
+			return clipboardMsg{err: err}
+		}
+		cmd := exec.Command(name, args...)
+		cmd.Stdin = strings.NewReader(url)
+		return clipboardMsg{err: cmd.Run()}
+	}
 }
