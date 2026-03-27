@@ -24,6 +24,7 @@ var (
 	ciColStyle     = lipgloss.NewStyle().Width(9)
 	reviewColStyle = lipgloss.NewStyle().Width(12)
 	mergeColStyle  = lipgloss.NewStyle().Width(10)
+	ageColStyle    = lipgloss.NewStyle().Width(6)
 
 	// Header and footer
 	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#BD93F9")).MarginBottom(1).MarginLeft(1)

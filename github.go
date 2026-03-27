@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,6 +59,9 @@ type PullRequest struct {
 	URL               string
 	Repo              string
 	Org               string
+	Author            string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 	CheckStatus       string
 	CheckRuns         []CheckRun
 	ReviewDecision    string
@@ -120,7 +124,12 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 					ReviewDecision     githubv4.String
 					Mergeable          githubv4.String
 					TotalCommentsCount githubv4.Int
-					ReviewThreads      struct {
+					Author             struct {
+						Login githubv4.String
+					}
+					CreatedAt githubv4.DateTime
+					UpdatedAt githubv4.DateTime
+					ReviewThreads struct {
 						TotalCount githubv4.Int
 						Nodes      []struct {
 							IsResolved githubv4.Boolean
@@ -199,6 +208,9 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 			URL:               string(pr.URL),
 			Repo:              string(pr.Repository.Name),
 			Org:               string(pr.Repository.Owner.Login),
+			Author:            string(pr.Author.Login),
+			CreatedAt:         pr.CreatedAt.Time,
+			UpdatedAt:         pr.UpdatedAt.Time,
 			CheckStatus:       checkStatus,
 			CheckRuns:         checkRuns,
 			ReviewDecision:    string(pr.ReviewDecision),
@@ -211,6 +223,177 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 	}
 
 	return prs, nil
+}
+
+func fetchOrgPRs(ctx context.Context, client *githubv4.Client, orgs []string) ([]PullRequest, error) {
+	var sb strings.Builder
+	sb.WriteString("is:pr is:open archived:false sort:updated-desc")
+	for _, org := range orgs {
+		if org == "" {
+			continue
+		}
+		sb.WriteString(" org:")
+		sb.WriteString(org)
+	}
+
+	var allPRs []PullRequest
+	var after *githubv4.String
+
+	for {
+		var q struct {
+			Search struct {
+				PageInfo struct {
+					HasNextPage githubv4.Boolean
+					EndCursor   githubv4.String
+				}
+				Nodes []struct {
+					PullRequest struct {
+						ID                 githubv4.ID
+						Number             githubv4.Int
+						Title              githubv4.String
+						URL                githubv4.String
+						IsDraft            githubv4.Boolean
+						ReviewDecision     githubv4.String
+						Mergeable          githubv4.String
+						TotalCommentsCount githubv4.Int
+						Author             struct {
+							Login githubv4.String
+						}
+						CreatedAt githubv4.DateTime
+						UpdatedAt githubv4.DateTime
+						ReviewThreads struct {
+							TotalCount githubv4.Int
+						}
+						Repository struct {
+							Name  githubv4.String
+							Owner struct {
+								Login githubv4.String
+							}
+						}
+						Commits struct {
+							Nodes []struct {
+								Commit struct {
+									StatusCheckRollup *struct {
+										State githubv4.String
+									}
+								}
+							}
+						} `graphql:"commits(last: 1)"`
+					} `graphql:"... on PullRequest"`
+				}
+			} `graphql:"search(query: $query, type: ISSUE, first: 100, after: $after)"`
+		}
+
+		variables := map[string]interface{}{
+			"query": githubv4.String(sb.String()),
+			"after": after,
+		}
+
+		if err := client.Query(ctx, &q, variables); err != nil {
+			return nil, err
+		}
+
+		for _, node := range q.Search.Nodes {
+			pr := node.PullRequest
+			if string(pr.Title) == "" {
+				continue
+			}
+
+			var checkStatus string
+			if len(pr.Commits.Nodes) > 0 {
+				rollup := pr.Commits.Nodes[0].Commit.StatusCheckRollup
+				if rollup != nil {
+					checkStatus = string(rollup.State)
+				}
+			}
+
+			allPRs = append(allPRs, PullRequest{
+				ID:             fmt.Sprintf("%v", pr.ID),
+				Number:         int(pr.Number),
+				Title:          string(pr.Title),
+				URL:            string(pr.URL),
+				Repo:           string(pr.Repository.Name),
+				Org:            string(pr.Repository.Owner.Login),
+				Author:         string(pr.Author.Login),
+				CreatedAt:      pr.CreatedAt.Time,
+				UpdatedAt:      pr.UpdatedAt.Time,
+				CheckStatus:    checkStatus,
+				CheckRuns:      nil,
+				ReviewDecision: string(pr.ReviewDecision),
+				IsDraft:        bool(pr.IsDraft),
+				TotalComments:  int(pr.TotalCommentsCount),
+				TotalThreads:   int(pr.ReviewThreads.TotalCount),
+				Mergeable:      string(pr.Mergeable),
+			})
+		}
+
+		if !bool(q.Search.PageInfo.HasNextPage) {
+			break
+		}
+		cursor := q.Search.PageInfo.EndCursor
+		after = &cursor
+
+		if len(allPRs) >= 1000 {
+			break
+		}
+	}
+
+	return allPRs, nil
+}
+
+func fetchCheckRuns(ctx context.Context, client *githubv4.Client, prID string) ([]CheckRun, error) {
+	var q struct {
+		Node struct {
+			PullRequest struct {
+				Commits struct {
+					Nodes []struct {
+						Commit struct {
+							StatusCheckRollup *struct {
+								Contexts struct {
+									Nodes []struct {
+										Typename string `graphql:"__typename"`
+										CheckRun struct {
+											Name       githubv4.String
+											Status     githubv4.String
+											Conclusion githubv4.String
+										} `graphql:"... on CheckRun"`
+									}
+								} `graphql:"contexts(first: 50)"`
+							}
+						}
+					}
+				} `graphql:"commits(last: 1)"`
+			} `graphql:"... on PullRequest"`
+		} `graphql:"node(id: $id)"`
+	}
+
+	variables := map[string]interface{}{
+		"id": githubv4.ID(prID),
+	}
+
+	if err := client.Query(ctx, &q, variables); err != nil {
+		return nil, err
+	}
+
+	var runs []CheckRun
+	pr := q.Node.PullRequest
+	if len(pr.Commits.Nodes) > 0 {
+		rollup := pr.Commits.Nodes[0].Commit.StatusCheckRollup
+		if rollup != nil {
+			for _, ctxNode := range rollup.Contexts.Nodes {
+				if ctxNode.Typename != "CheckRun" {
+					continue
+				}
+				runs = append(runs, CheckRun{
+					Name:       string(ctxNode.CheckRun.Name),
+					Status:     string(ctxNode.CheckRun.Status),
+					Conclusion: string(ctxNode.CheckRun.Conclusion),
+				})
+			}
+		}
+	}
+
+	return runs, nil
 }
 
 func closePR(ctx context.Context, client *githubv4.Client, prID string) error {
@@ -239,6 +422,22 @@ func mergePR(ctx context.Context, client *githubv4.Client, prID string) error {
 	input := githubv4.MergePullRequestInput{
 		PullRequestID: githubv4.ID(prID),
 		MergeMethod:   &squash,
+	}
+	return client.Mutate(ctx, &m, input, nil)
+}
+
+func approvePR(ctx context.Context, client *githubv4.Client, prID string) error {
+	var m struct {
+		AddPullRequestReview struct {
+			PullRequestReview struct {
+				State githubv4.String
+			}
+		} `graphql:"addPullRequestReview(input:$input)"`
+	}
+	event := githubv4.PullRequestReviewEventApprove
+	input := githubv4.AddPullRequestReviewInput{
+		PullRequestID: githubv4.ID(prID),
+		Event:         &event,
 	}
 	return client.Mutate(ctx, &m, input, nil)
 }
