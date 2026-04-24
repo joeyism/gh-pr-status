@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"time"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
@@ -60,8 +60,8 @@ type PullRequest struct {
 	Repo              string
 	Org               string
 	Author            string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 	CheckStatus       string
 	CheckRuns         []CheckRun
 	ReviewDecision    string
@@ -70,6 +70,7 @@ type PullRequest struct {
 	UnresolvedThreads int
 	TotalThreads      int
 	Mergeable         string
+	HeadRefName       string
 }
 
 // countUnresolved counts unresolved review threads from a node slice.
@@ -123,12 +124,13 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 					IsDraft            githubv4.Boolean
 					ReviewDecision     githubv4.String
 					Mergeable          githubv4.String
+					HeadRefName        githubv4.String
 					TotalCommentsCount githubv4.Int
 					Author             struct {
 						Login githubv4.String
 					}
-					CreatedAt githubv4.DateTime
-					UpdatedAt githubv4.DateTime
+					CreatedAt     githubv4.DateTime
+					UpdatedAt     githubv4.DateTime
 					ReviewThreads struct {
 						TotalCount githubv4.Int
 						Nodes      []struct {
@@ -219,6 +221,7 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 			UnresolvedThreads: unresolved,
 			TotalThreads:      int(pr.ReviewThreads.TotalCount),
 			Mergeable:         string(pr.Mergeable),
+			HeadRefName:       string(pr.HeadRefName),
 		})
 	}
 
@@ -255,12 +258,13 @@ func fetchOrgPRs(ctx context.Context, client *githubv4.Client, orgs []string) ([
 						IsDraft            githubv4.Boolean
 						ReviewDecision     githubv4.String
 						Mergeable          githubv4.String
+						HeadRefName        githubv4.String
 						TotalCommentsCount githubv4.Int
 						Author             struct {
 							Login githubv4.String
 						}
-						CreatedAt githubv4.DateTime
-						UpdatedAt githubv4.DateTime
+						CreatedAt     githubv4.DateTime
+						UpdatedAt     githubv4.DateTime
 						ReviewThreads struct {
 							TotalCount githubv4.Int
 						}
@@ -324,6 +328,7 @@ func fetchOrgPRs(ctx context.Context, client *githubv4.Client, orgs []string) ([
 				TotalComments:  int(pr.TotalCommentsCount),
 				TotalThreads:   int(pr.ReviewThreads.TotalCount),
 				Mergeable:      string(pr.Mergeable),
+				HeadRefName:    string(pr.HeadRefName),
 			})
 		}
 
@@ -438,6 +443,34 @@ func approvePR(ctx context.Context, client *githubv4.Client, prID string) error 
 	input := githubv4.AddPullRequestReviewInput{
 		PullRequestID: githubv4.ID(prID),
 		Event:         &event,
+	}
+	return client.Mutate(ctx, &m, input, nil)
+}
+
+func convertToDraft(ctx context.Context, client *githubv4.Client, prID string) error {
+	var m struct {
+		ConvertPullRequestToDraft struct {
+			PullRequest struct {
+				IsDraft githubv4.Boolean
+			}
+		} `graphql:"convertPullRequestToDraft(input:$input)"`
+	}
+	input := githubv4.ConvertPullRequestToDraftInput{
+		PullRequestID: githubv4.ID(prID),
+	}
+	return client.Mutate(ctx, &m, input, nil)
+}
+
+func markReadyForReview(ctx context.Context, client *githubv4.Client, prID string) error {
+	var m struct {
+		MarkPullRequestReadyForReview struct {
+			PullRequest struct {
+				IsDraft githubv4.Boolean
+			}
+		} `graphql:"markPullRequestReadyForReview(input:$input)"`
+	}
+	input := githubv4.MarkPullRequestReadyForReviewInput{
+		PullRequestID: githubv4.ID(prID),
 	}
 	return client.Mutate(ctx, &m, input, nil)
 }

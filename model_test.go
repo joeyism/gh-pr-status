@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -73,8 +74,36 @@ func TestUpdateYankKey(t *testing.T) {
 		if mod.confirmAction != "" {
 			t.Fatal("confirmAction should be cleared")
 		}
-		if strings.Contains(mod.flash, "URL copied") {
+		if strings.Contains(mod.flash, "Copied to clipboard") {
 			t.Fatal("flash should not indicate yank")
+		}
+	})
+}
+
+func TestBranchKey(t *testing.T) {
+	prs := []PullRequest{{Number: 1, Title: "PR 1", HeadRefName: "feature-branch"}}
+
+	t.Run("copies branch name", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = prs
+		m.viewMode = 0
+
+		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}}
+		_, cmd := m.Update(msg)
+		if cmd == nil {
+			t.Fatal("expected command to be returned")
+		}
+	})
+
+	t.Run("no command when no branch name", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = []PullRequest{{Number: 1, Title: "PR 1"}}
+		m.viewMode = 0
+
+		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}}
+		_, cmd := m.Update(msg)
+		if cmd != nil {
+			t.Fatal("expected no command when HeadRefName is empty")
 		}
 	})
 }
@@ -164,6 +193,137 @@ func TestMessages(t *testing.T) {
 		mod := newModel.(model)
 		if len(mod.org.prs[0].CheckRuns) != 1 {
 			t.Error("expected check runs to be populated")
+		}
+	})
+}
+
+func TestDraftToggle(t *testing.T) {
+	dKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}
+	yKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}
+	nKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}
+
+	t.Run("d key sets confirmAction in personal view", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = []PullRequest{{Number: 1, Title: "My PR", IsDraft: false}}
+		m.viewMode = 0
+
+		newModel, _ := m.Update(dKey)
+		mod := newModel.(model)
+		if mod.confirmAction != "draft" {
+			t.Fatalf("expected confirmAction 'draft', got %q", mod.confirmAction)
+		}
+	})
+
+	t.Run("d key sets confirmAction for draft PR", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = []PullRequest{{Number: 1, Title: "My PR", IsDraft: true}}
+		m.viewMode = 0
+
+		newModel, _ := m.Update(dKey)
+		mod := newModel.(model)
+		if mod.confirmAction != "draft" {
+			t.Fatalf("expected confirmAction 'draft', got %q", mod.confirmAction)
+		}
+	})
+
+	t.Run("d key blocked in org view", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.org.prs = []PullRequest{{Number: 1, Title: "PR", IsDraft: false}}
+		m.viewMode = 1
+
+		newModel, _ := m.Update(dKey)
+		mod := newModel.(model)
+		if mod.confirmAction == "draft" {
+			t.Error("draft toggle should be blocked in org view")
+		}
+	})
+
+	t.Run("d key blocked with no PRs", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.viewMode = 0
+
+		newModel, _ := m.Update(dKey)
+		mod := newModel.(model)
+		if mod.confirmAction != "" {
+			t.Errorf("expected empty confirmAction, got %q", mod.confirmAction)
+		}
+	})
+
+	t.Run("confirm y on non-draft PR returns command", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = []PullRequest{{Number: 1, ID: "PR_1", Title: "My PR", IsDraft: false}}
+		m.viewMode = 0
+		m.confirmAction = "draft"
+
+		newModel, cmd := m.Update(yKey)
+		mod := newModel.(model)
+		if mod.confirmAction != "" {
+			t.Fatal("confirmAction should be cleared after confirm")
+		}
+		if cmd == nil {
+			t.Fatal("expected command to be returned for draft toggle")
+		}
+	})
+
+	t.Run("confirm y on draft PR returns command", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = []PullRequest{{Number: 1, ID: "PR_1", Title: "My PR", IsDraft: true}}
+		m.viewMode = 0
+		m.confirmAction = "draft"
+
+		newModel, cmd := m.Update(yKey)
+		mod := newModel.(model)
+		if mod.confirmAction != "" {
+			t.Fatal("confirmAction should be cleared after confirm")
+		}
+		if cmd == nil {
+			t.Fatal("expected command to be returned for mark ready")
+		}
+	})
+
+	t.Run("confirm n cancels", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		m.mine.prs = []PullRequest{{Number: 1, ID: "PR_1", Title: "My PR", IsDraft: false}}
+		m.viewMode = 0
+		m.confirmAction = "draft"
+
+		newModel, cmd := m.Update(nKey)
+		mod := newModel.(model)
+		if mod.confirmAction != "" {
+			t.Fatal("confirmAction should be cleared on cancel")
+		}
+		if cmd != nil {
+			t.Fatal("expected no command on cancel")
+		}
+	})
+
+	t.Run("draftToggledMsg success ready", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		msg := draftToggledMsg{err: nil, isDraft: false}
+		newModel, _ := m.Update(msg)
+		mod := newModel.(model)
+		if !strings.Contains(mod.flash, "ready for review") {
+			t.Errorf("expected flash to contain 'ready for review', got %q", mod.flash)
+		}
+	})
+
+	t.Run("draftToggledMsg success draft", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		msg := draftToggledMsg{err: nil, isDraft: true}
+		newModel, _ := m.Update(msg)
+		mod := newModel.(model)
+		if !strings.Contains(mod.flash, "draft") {
+			t.Errorf("expected flash to contain 'draft', got %q", mod.flash)
+		}
+	})
+
+	t.Run("draftToggledMsg error flash", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0)
+		msg := draftToggledMsg{err: fmt.Errorf("network error")}
+		newModel, _ := m.Update(msg)
+		mod := newModel.(model)
+		if !strings.Contains(mod.flash, "Error") {
+			t.Errorf("expected flash to contain 'Error', got %q", mod.flash)
 		}
 	})
 }

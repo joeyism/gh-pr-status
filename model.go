@@ -34,6 +34,10 @@ type prClosedMsg struct{ err error }
 type prMergedMsg struct{ err error }
 type prApprovedMsg struct{ err error }
 type clipboardMsg struct{ err error }
+type draftToggledMsg struct {
+	err     error
+	isDraft bool // the new state after toggle
+}
 
 type clearFlashMsg struct{}
 
@@ -63,10 +67,10 @@ type model struct {
 	width         int
 	height        int
 
-	client   *githubv4.Client
-	username string
-	orgs     []string
-	pollInterval   time.Duration
+	client       *githubv4.Client
+	username     string
+	orgs         []string
+	pollInterval time.Duration
 }
 
 func (m *model) activeView() *viewState {
@@ -132,6 +136,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.mergePRCmd(pr.ID)
 				case "approve":
 					return m, m.approvePRCmd(pr.ID)
+				case "draft":
+					if pr.IsDraft {
+						return m, m.markReadyCmd(pr.ID)
+					}
+					return m, m.convertToDraftCmd(pr.ID)
 				}
 			case "n", "esc":
 				m.confirmAction = ""
@@ -186,6 +195,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.confirmAction = "approve"
 				}
 			}
+		case "d":
+			if m.viewMode == 0 && len(v.prs) > 0 {
+				m.confirmAction = "draft"
+			}
 		case "r":
 			if !v.fetching {
 				v.fetching = true
@@ -197,6 +210,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "y":
 			if len(v.prs) > 0 {
 				return m, copyToClipboardCmd(v.prs[v.cursor].URL)
+			}
+		case "b":
+			if len(v.prs) > 0 && v.prs[v.cursor].HeadRefName != "" {
+				return m, copyToClipboardCmd(v.prs[v.cursor].HeadRefName)
 			}
 		case "a":
 			m.viewMode = 1 - m.viewMode
@@ -255,11 +272,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} }), m.fetchPRsCmd())
 
+	case draftToggledMsg:
+		if msg.err != nil {
+			m.flash = flashFailureMsg.Render(fmt.Sprintf("Error toggling draft: %v", msg.err))
+			return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
+		}
+		if msg.isDraft {
+			m.flash = flashSuccessMsg.Render("Converted to draft ✓")
+		} else {
+			m.flash = flashSuccessMsg.Render("Marked as ready for review ✓")
+		}
+		v.fetching = true
+		if m.viewMode == 1 {
+			return m, tea.Batch(tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} }), m.fetchOrgPRsCmd())
+		}
+		return m, tea.Batch(tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} }), m.fetchPRsCmd())
+
 	case clipboardMsg:
 		if msg.err != nil {
 			m.flash = flashFailureMsg.Render(fmt.Sprintf("Copy failed: %v", msg.err))
 		} else {
-			m.flash = flashSuccessMsg.Render("URL copied ✓")
+			m.flash = flashSuccessMsg.Render("Copied to clipboard ✓")
 		}
 		return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
 
@@ -534,9 +567,9 @@ func (m model) View() string {
 		flashLine = "\n" + m.flash
 	}
 
-	help := "j/k: nav • tab: expand • o: open • y: yank • r: refresh • c: review • x: close • m: merge • a: org view • q: quit"
+	help := "j/k: nav • tab: expand • o: open • y: yank • b: branch • r: refresh • c: review • d: draft • x: close • m: merge • a: org view • q: quit"
 	if m.viewMode == 1 {
-		help = "j/k: nav • tab: expand • o: open • y: yank • r: refresh • p: approve • a: my prs • q: quit"
+		help = "j/k: nav • tab: expand • o: open • y: yank • b: branch • r: refresh • p: approve • a: my prs • q: quit"
 	}
 	b.WriteString(footerStyle.Render(fmt.Sprintf("\n%s%s%s                    %s", ago, fetchIndicator, flashLine, help)))
 
@@ -546,14 +579,20 @@ func (m model) View() string {
 		borderColor = lipgloss.Color("#BD93F9")
 	}
 	innerW, innerH := m.width-2, m.height-2
-	if innerW < 0 { innerW = 0 }
-	if innerH < 0 { innerH = 0 }
+	if innerW < 0 {
+		innerW = 0
+	}
+	if innerH < 0 {
+		innerH = 0
+	}
 	out = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(borderColor).Width(innerW).Height(innerH).Render(out)
 
 	if m.confirmAction != "" && len(v.prs) > 0 {
 		pr := v.prs[v.cursor]
 		title := pr.Title
-		if len(title) > 40 { title = title[:39] + "…" }
+		if len(title) > 40 {
+			title = title[:39] + "…"
+		}
 		var questionText string
 		var yesBtnColor lipgloss.Color
 		switch m.confirmAction {
@@ -563,6 +602,12 @@ func (m model) View() string {
 			questionText, yesBtnColor = "Squash and merge", lipgloss.Color("#50FA7B")
 		case "approve":
 			questionText, yesBtnColor = "Approve pull request", lipgloss.Color("#50FA7B")
+		case "draft":
+			if pr.IsDraft {
+				questionText, yesBtnColor = "Mark as ready for review", lipgloss.Color("#50FA7B")
+			} else {
+				questionText, yesBtnColor = "Convert to draft (dismisses reviews)", lipgloss.Color("#FF5555")
+			}
 		default:
 			questionText, yesBtnColor = "Request @cursor review on", lipgloss.Color("#50FA7B")
 		}
@@ -579,36 +624,56 @@ func (m model) View() string {
 
 func formatCIStatus(status string) string {
 	switch status {
-	case "SUCCESS": return successStyle.Render("✓ pass")
-	case "FAILURE": return failureStyle.Render("✗ fail")
-	case "PENDING": return runningStyle.Render("● run")
-	case "ERROR": return failureStyle.Render("✗ err")
-	default: return dimStyle.Render("○ --")
+	case "SUCCESS":
+		return successStyle.Render("✓ pass")
+	case "FAILURE":
+		return failureStyle.Render("✗ fail")
+	case "PENDING":
+		return runningStyle.Render("● run")
+	case "ERROR":
+		return failureStyle.Render("✗ err")
+	default:
+		return dimStyle.Render("○ --")
 	}
 }
 
 func formatReviewStatus(decision string) string {
 	switch decision {
-	case "APPROVED": return successStyle.Render("✓ approved")
-	case "CHANGES_REQUESTED": return failureStyle.Render("✗ changes")
-	case "REVIEW_REQUIRED": return pendingStyle.Render("~ pending")
-	default: return dimStyle.Render("- none")
+	case "APPROVED":
+		return successStyle.Render("✓ approved")
+	case "CHANGES_REQUESTED":
+		return failureStyle.Render("✗ changes")
+	case "REVIEW_REQUIRED":
+		return pendingStyle.Render("~ pending")
+	default:
+		return dimStyle.Render("- none")
 	}
 }
 
 func formatMergeable(status string) string {
 	switch status {
-	case "MERGEABLE": return successStyle.Render("+ ready")
-	case "CONFLICTING": return failureStyle.Render("! conflict")
-	default: return dimStyle.Render("? unknown")
+	case "MERGEABLE":
+		return successStyle.Render("+ ready")
+	case "CONFLICTING":
+		return failureStyle.Render("! conflict")
+	default:
+		return dimStyle.Render("? unknown")
 	}
 }
 
 func formatComments(total, unresolved, totalThreads int) string {
-	if total == 0 && totalThreads == 0 { return dimStyle.Render("💬 0") }
-	if totalThreads == 0 && total > 0 { return dimStyle.Render(fmt.Sprintf("💬 %d", total)) }
-	if unresolved == -1 { return fmt.Sprintf("%s %s", dimStyle.Render(fmt.Sprintf("💬 %d", total)), pendingStyle.Render("(? unresolved)")) }
-	if unresolved == 0 { return fmt.Sprintf("%s %s", dimStyle.Render(fmt.Sprintf("💬 %d", total)), successStyle.Render("(0 unresolved)")) }
+	if total == 0 && totalThreads == 0 {
+		return dimStyle.Render("💬 0")
+	}
+	if totalThreads == 0 && total > 0 {
+		return dimStyle.Render(fmt.Sprintf("💬 %d", total))
+	}
+	if unresolved == -1 {
+		return fmt.Sprintf("%s %s", dimStyle.Render(fmt.Sprintf("💬 %d", total)), pendingStyle.Render("(? unresolved)"))
+	}
+	if unresolved == 0 {
+		return fmt.Sprintf("%s %s", dimStyle.Render(fmt.Sprintf("💬 %d", total)), successStyle.Render("(0 unresolved)"))
+	}
 	return fmt.Sprintf("%s %s", dimStyle.Render(fmt.Sprintf("💬 %d", total)), pendingStyle.Render(fmt.Sprintf("(%d unresolved)", unresolved)))
 }
 
@@ -617,17 +682,22 @@ func formatCheckRun(cr CheckRun) string {
 	symbol, label := "●", strings.ToLower(cr.Status)
 	if cr.Status == "COMPLETED" {
 		switch cr.Conclusion {
-		case "SUCCESS": symbol, label = "✓", "passed"
-		case "FAILURE": symbol, label = "✗", "failed"
-		case "SKIPPED": symbol, label = "→", "skipped"
-		case "NEUTRAL": symbol, label = "–", "neutral"
-		case "CANCELLED": symbol, label = "✕", "cancelled"
-		default: label = cr.Conclusion
+		case "SUCCESS":
+			symbol, label = "✓", "passed"
+		case "FAILURE":
+			symbol, label = "✗", "failed"
+		case "SKIPPED":
+			symbol, label = "→", "skipped"
+		case "NEUTRAL":
+			symbol, label = "–", "neutral"
+		case "CANCELLED":
+			symbol, label = "✕", "cancelled"
+		default:
+			label = cr.Conclusion
 		}
 	}
 	return s.Render(fmt.Sprintf("%s %s — %s", symbol, cr.Name, label))
 }
-
 
 func formatAge(t time.Time) string {
 	if t.IsZero() {
@@ -680,6 +750,22 @@ func (m model) approvePRCmd(prID string) tea.Cmd {
 	}
 }
 
+func (m model) convertToDraftCmd(prID string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		err := convertToDraft(context.Background(), client, prID)
+		return draftToggledMsg{err: err, isDraft: true}
+	}
+}
+
+func (m model) markReadyCmd(prID string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		err := markReadyForReview(context.Background(), client, prID)
+		return draftToggledMsg{err: err, isDraft: false}
+	}
+}
+
 func (m model) fetchPRsCmd() tea.Cmd {
 	client, username, orgs := m.client, m.username, m.orgs
 	return func() tea.Msg {
@@ -718,25 +804,33 @@ func openBrowserCmd(url string) tea.Cmd {
 func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
-	case "darwin": cmd = exec.Command("open", url)
-	case "linux": cmd = exec.Command("xdg-open", url)
-	default: cmd = exec.Command("open", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	default:
+		cmd = exec.Command("open", url)
 	}
 	_ = cmd.Start()
 }
 
 func clipboardCommand(goos string) (string, []string, error) {
 	switch goos {
-	case "darwin": return "pbcopy", nil, nil
-	case "linux": return "xclip", []string{"-selection", "clipboard"}, nil
-	default: return "", nil, fmt.Errorf("unsupported OS: %s", goos)
+	case "darwin":
+		return "pbcopy", nil, nil
+	case "linux":
+		return "xclip", []string{"-selection", "clipboard"}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported OS: %s", goos)
 	}
 }
 
 func copyToClipboardCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		name, args, err := clipboardCommand(runtime.GOOS)
-		if err != nil { return clipboardMsg{err: err} }
+		if err != nil {
+			return clipboardMsg{err: err}
+		}
 		cmd := exec.Command(name, args...)
 		cmd.Stdin = strings.NewReader(url)
 		return clipboardMsg{err: cmd.Run()}
