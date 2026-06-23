@@ -45,6 +45,8 @@ type tickMsg time.Time
 
 type viewState struct {
 	prs            []PullRequest
+	sortField      sortField
+	sortDir        sortDir
 	cursor         int
 	scrollOffset   int
 	expanded       map[int]bool
@@ -62,7 +64,10 @@ type model struct {
 	viewMode int // 0 = mine, 1 = org
 
 	focused       bool
-	confirmAction string // "cursor" | "close" | "merge" | "approve" | "" (none)
+	confirmAction string  // "cursor" | "close" | "merge" | "approve" | "" (none)
+	sortMenuOpen  bool
+	sortMenuCursor int   // index into sortFieldOrder
+	sortMenuDir   sortDir
 	flash         string
 	width         int
 	height        int
@@ -80,9 +85,11 @@ func (m *model) activeView() *viewState {
 	return &m.mine
 }
 
-func initialModel(client *githubv4.Client, username string, orgs []string, pollInterval time.Duration) model {
+func initialModel(client *githubv4.Client, username string, orgs []string, pollInterval time.Duration, defSortField sortField, defSortDir sortDir) model {
 	return model{
 		mine: viewState{
+			sortField:      defSortField,
+			sortDir:        defSortDir,
 			loading:        true,
 			fetching:       true,
 			expanded:       make(map[int]bool),
@@ -90,6 +97,8 @@ func initialModel(client *githubv4.Client, username string, orgs []string, pollI
 			previousStatus: make(map[int]string),
 		},
 		org: viewState{
+			sortField:      defSortField,
+			sortDir:        defSortDir,
 			expanded:       make(map[int]bool),
 			changedAt:      make(map[int]time.Time),
 			previousStatus: make(map[int]string),
@@ -148,6 +157,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Sort menu: own its keys when open.
+		if m.sortMenuOpen {
+			switch msg.String() {
+			case "down", "j":
+				if m.sortMenuCursor < len(sortFieldOrder)-1 {
+					m.sortMenuCursor++
+				}
+			case "up", "k":
+				if m.sortMenuCursor > 0 {
+					m.sortMenuCursor--
+				}
+			case "tab":
+				if m.sortMenuDir == sortAsc {
+					m.sortMenuDir = sortDesc
+				} else {
+					m.sortMenuDir = sortAsc
+				}
+			case "enter":
+				field := sortFieldOrder[m.sortMenuCursor]
+				m.applySortToActiveView(field, m.sortMenuDir)
+				m.sortMenuOpen = false
+			case "esc", "q":
+				m.sortMenuOpen = false
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -171,6 +207,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.fetchCheckRunsCmd(pr.ID, pr.Number)
 				}
 				m.adjustScroll()
+			}
+		case "s":
+			if m.confirmAction == "" {
+				m.sortMenuOpen = true
+				m.sortMenuDir = v.sortDir
+				m.sortMenuCursor = indexOfSortField(v.sortField)
 			}
 		case "o":
 			if len(v.prs) > 0 {
@@ -315,11 +357,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.mine.previousStatus[pr.Number] = newKey
 		}
+		// Capture selected PR from the *old* slice before replacing it, so
+		// sortPRs can move the cursor to the new index of the same PR.
+		selected, keep := selectedPRNumber(&m.mine)
 		m.mine.prs = msg.prs
-		if m.mine.cursor >= len(m.mine.prs) && len(m.mine.prs) > 0 {
-			m.mine.cursor = len(m.mine.prs) - 1
-		}
-		m.adjustScroll()
+		m.sortPRs(&m.mine, selected, keep)
 		if statusChanged {
 			return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
 		}
@@ -334,11 +376,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.org.err = nil
 		now := time.Now()
 		m.org.lastUpdated = now
+		selected, keep := selectedPRNumber(&m.org)
 		m.org.prs = msg.prs
-		if m.org.cursor >= len(m.org.prs) && len(m.org.prs) > 0 {
-			m.org.cursor = len(m.org.prs) - 1
-		}
-		m.adjustScroll()
+		m.sortPRs(&m.org, selected, keep)
 
 	case checkRunsFetchedMsg:
 		for i, pr := range m.org.prs {
@@ -371,7 +411,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) adjustScroll() {
-	v := m.activeView()
+	m.adjustScrollFor(m.activeView())
+}
+
+func (m *model) adjustScrollFor(v *viewState) {
 	if len(v.prs) == 0 {
 		return
 	}
@@ -413,6 +456,46 @@ func (m *model) adjustScroll() {
 		}
 		v.scrollOffset++
 	}
+}
+
+// selectedPRNumber returns the Number of the PR at the cursor, or (0, false)
+// if the list is empty.
+func selectedPRNumber(v *viewState) (int, bool) {
+	if len(v.prs) == 0 || v.cursor < 0 || v.cursor >= len(v.prs) {
+		return 0, false
+	}
+	return v.prs[v.cursor].Number, true
+}
+
+// sortPRs sorts v.prs in place by v.sortField/v.sortDir with stable tiebreaks.
+// If keepSelection is true, the cursor is moved to the new index of the PR
+// whose Number matches selectedNumber (clamped to last if not found).
+// Empty/single-element slices are no-ops.
+func (m *model) sortPRs(v *viewState, selectedNumber int, keepSelection bool) {
+	if len(v.prs) <= 1 {
+		v.cursor = 0
+		m.adjustScrollFor(v)
+		return
+	}
+	sortPRsSlice(v.prs, v.sortField, v.sortDir)
+	if keepSelection {
+		idx := findPRIndexByNumber(v.prs, selectedNumber)
+		if idx < 0 {
+			idx = len(v.prs) - 1
+		}
+		v.cursor = idx
+	}
+	m.adjustScrollFor(v)
+}
+
+// applySortToActiveView updates the active view's sortField/sortDir and
+// re-sorts the existing slice in place with cursor-follow.
+func (m *model) applySortToActiveView(field sortField, dir sortDir) {
+	v := m.activeView()
+	selected, keep := selectedPRNumber(v)
+	v.sortField = field
+	v.sortDir = dir
+	m.sortPRs(v, selected, keep)
 }
 
 func (m model) View() string {
@@ -462,12 +545,7 @@ func (m model) View() string {
 		authorWidth++
 		dynAuthorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Width(authorWidth)
 
-		repoGap := strings.Repeat(" ", 3+repoWidth+1)
-		if m.viewMode == 1 {
-			repoGap += strings.Repeat(" ", authorWidth+1)
-		}
-		b.WriteString(columnHeaderStyle.Render(fmt.Sprintf("%s%-50s %-9s %-12s %-10s %-6s %-6s",
-			repoGap, "", "CI", "Review", "Merge", "Upd", "Crtd")))
+		b.WriteString(m.renderColumnHeader(v, repoWidth, authorWidth))
 		b.WriteString("\n\n")
 
 		visibleLines := m.height - 9
@@ -567,9 +645,9 @@ func (m model) View() string {
 		flashLine = "\n" + m.flash
 	}
 
-	help := "j/k: nav • tab: expand • o: open • y: yank • b: branch • r: refresh • c: review • d: draft • x: close • m: merge • a: org view • q: quit"
+	help := "j/k: nav • tab: expand • s: sort • o: open • y: yank • b: branch • r: refresh • c: review • d: draft • x: close • m: merge • a: org view • q: quit"
 	if m.viewMode == 1 {
-		help = "j/k: nav • tab: expand • o: open • y: yank • b: branch • r: refresh • p: approve • a: my prs • q: quit"
+		help = "j/k: nav • tab: expand • s: sort • o: open • y: yank • b: branch • r: refresh • p: approve • a: my prs • q: quit"
 	}
 	b.WriteString(footerStyle.Render(fmt.Sprintf("\n%s%s%s                    %s", ago, fetchIndicator, flashLine, help)))
 
@@ -618,8 +696,92 @@ func (m model) View() string {
 		content := lipgloss.JoinVertical(lipgloss.Left, question, prInfo, "", yesBtn+"    "+noBtn)
 		box := overlayBoxStyle.Render(content)
 		out = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box, lipgloss.WithWhitespaceChars(" "), lipgloss.WithWhitespaceForeground(lipgloss.Color("236")))
+	} else if m.sortMenuOpen {
+		dirLabel := "Descending"
+		if m.sortMenuDir == sortAsc {
+			dirLabel = "Ascending"
+		}
+		title := overlayTextStyle.Bold(true).Render("Sort pull requests")
+		direction := overlayDimStyle.Render(fmt.Sprintf("Direction: %s   (tab toggles)", dirLabel))
+		rows := make([]string, 0, len(sortFieldOrder))
+		for i, f := range sortFieldOrder {
+			label := "  " + sortOptions[f].Label
+			if i == m.sortMenuCursor {
+				label = cursorStyle.Render("› ") + sortOptions[f].Label
+			}
+			rows = append(rows, label)
+		}
+		help := overlayDimStyle.Render("enter: apply   esc: cancel")
+		lines := append([]string{title, direction, ""}, append(rows, "", help)...)
+		content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+		box := overlayBoxStyle.Render(content)
+		out = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box, lipgloss.WithWhitespaceChars(" "), lipgloss.WithWhitespaceForeground(lipgloss.Color("236")))
 	}
 	return out
+}
+
+// columnHeaderCell returns a header cell with the given label padded to
+// width. If active is true, the cell is rendered in activeColumnHeaderStyle
+// and the sort arrow is appended.
+func columnHeaderCell(label string, width int, active bool, arrow string) string {
+	text := label
+	if active {
+		text = label + " " + arrow
+	}
+	if active {
+		return activeColumnHeaderStyle.Width(width).Render(text)
+	}
+	return columnHeaderStyle.Width(width).Render(text)
+}
+
+// renderColumnHeader builds the column header line for the active view.
+// Labels are added for Repo, (Author in org view), Title, CI, Review, Merge,
+// Upd, Crtd, and Cmts. The active sort field's label gets the arrow. Fields
+// with no visible column (number always; author in My PRs) render a trailing
+// badge.
+func (m model) renderColumnHeader(v *viewState, repoWidth, authorWidth int) string {
+	arrow := sortArrow(v.sortDir)
+	var b strings.Builder
+	// Cursor area (3 chars, matches the row's "┃  " / "   ").
+	b.WriteString(strings.Repeat(" ", 3))
+
+	b.WriteString(columnHeaderCell("Repo", repoWidth, v.sortField == sortFieldRepo, arrow))
+	b.WriteString(" ")
+
+	if m.viewMode == 1 {
+		b.WriteString(columnHeaderCell("Author", authorWidth, v.sortField == sortFieldAuthor, arrow))
+		b.WriteString(" ")
+	}
+
+	b.WriteString(columnHeaderCell("Title", 50, v.sortField == sortFieldTitle, arrow))
+
+	cells := []struct {
+		label string
+		field sortField
+		width int
+	}{
+		{"CI", sortFieldCI, 9},
+		{"Review", sortFieldReview, 12},
+		{"Merge", sortFieldMerge, 10},
+		{"Upd", sortFieldUpdated, 6},
+		{"Crtd", sortFieldCreated, 6},
+		{"Cmts", sortFieldComments, 6},
+	}
+	for _, c := range cells {
+		b.WriteString(" ")
+		b.WriteString(columnHeaderCell(c.label, c.width, v.sortField == c.field, arrow))
+	}
+
+	// Fallback badge for fields with no visible column.
+	switch v.sortField {
+	case sortFieldNumber:
+		b.WriteString(sortBadgeStyle.Render("  [sort: Number " + arrow + "]"))
+	case sortFieldAuthor:
+		if m.viewMode == 0 {
+			b.WriteString(sortBadgeStyle.Render("  [sort: Author " + arrow + "]"))
+		}
+	}
+	return b.String()
 }
 
 func formatCIStatus(status string) string {

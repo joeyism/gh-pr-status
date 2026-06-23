@@ -30,10 +30,14 @@ By default it shows all open PRs authored by you. To scope results to specific o
 |---|---|
 | `j` / `k` or arrow keys | Move cursor up/down |
 | `tab` | Expand/collapse check runs for selected PR |
+| `s` | Open the sort menu (changes the sort for the current session only) |
 | `o` | Open selected PR in browser |
 | `r` | Force refresh |
 | `c` | Post `@cursor review` comment on selected PR |
 | `q` / `ctrl+c` | Quit |
+
+Inside the sort menu: `j`/`k` (or arrow keys) to move, `tab` to toggle
+ascending/descending, `enter` to apply, `esc` to cancel.
 
 ## Configuration
 
@@ -44,12 +48,21 @@ orgs:
   - mycompany
   - other-org
 poll_interval: "30s"
+sort_by: "updated"
+sort_dir: "desc"
 ```
 
 | Field | Description | Default |
 |---|---|---|
 | `orgs` | GitHub organizations to include in the PR search | none |
 | `poll_interval` | How often to refresh (minimum `5s`) | `30s` |
+| `sort_by` | Initial sort field: `updated`, `created`, `repo`, `author`, `title`, `ci`, `review`, `merge`, `comments`, or `number` | `updated` |
+| `sort_dir` | Initial sort direction: `asc` or `desc` | `desc` |
+
+The `sort_by` and `sort_dir` values only set the startup default. The in-app
+sort menu changes the sort for the current session; it does not write back to
+the config file. Invalid values are ignored and fall back to the defaults
+with a warning printed to stderr.
 
 ## Authentication
 

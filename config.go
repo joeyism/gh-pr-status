@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -18,6 +19,8 @@ const (
 type Config struct {
 	Orgs         []string `yaml:"orgs"`
 	PollInterval string   `yaml:"poll_interval"`
+	SortBy       string   `yaml:"sort_by"`
+	SortDir      string   `yaml:"sort_dir"`
 }
 
 // PollDuration returns the effective polling interval after applying defaults.
@@ -31,6 +34,31 @@ func (c Config) PollDuration() time.Duration {
 		return defaultPollInterval
 	}
 	return parsed
+}
+
+// SortConfig returns the effective sort field and direction after applying
+// defaults. Empty values fall back silently; invalid values emit a stderr
+// warning and fall back to the default.
+func (c Config) SortConfig() (sortField, sortDir) {
+	field, ok := parseSortField(c.SortBy)
+	if !ok {
+		if c.SortBy != "" {
+			fmt.Fprintf(os.Stderr, "warning: invalid sort_by %q, using default %q\n", c.SortBy, defaultSortField)
+		}
+		field = defaultSortField
+	}
+	dir, ok := parseSortDir(c.SortDir)
+	if !ok {
+		if c.SortDir != "" {
+			fmt.Fprintf(os.Stderr, "warning: invalid sort_dir %q, using default %q\n", c.SortDir, defaultSortDir)
+		}
+		dir = defaultSortDir
+	}
+	return field, dir
+}
+
+func normalize(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 func defaultConfigPath() string {

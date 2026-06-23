@@ -43,7 +43,8 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "Authenticated as %s\n", username)
 
-	m := initialModel(client, username, cfg.Orgs, cfg.PollDuration())
+	sortField, sortDir := cfg.SortConfig()
+	m := initialModel(client, username, cfg.Orgs, cfg.PollDuration(), sortField, sortDir)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithReportFocus())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)

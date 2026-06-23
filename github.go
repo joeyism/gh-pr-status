@@ -267,7 +267,10 @@ func fetchOrgPRs(ctx context.Context, client *githubv4.Client, orgs []string) ([
 						UpdatedAt     githubv4.DateTime
 						ReviewThreads struct {
 							TotalCount githubv4.Int
-						}
+							Nodes      []struct {
+								IsResolved githubv4.Boolean
+							}
+						} `graphql:"reviewThreads(first: 100)"`
 						Repository struct {
 							Name  githubv4.String
 							Owner struct {
@@ -312,23 +315,24 @@ func fetchOrgPRs(ctx context.Context, client *githubv4.Client, orgs []string) ([
 			}
 
 			allPRs = append(allPRs, PullRequest{
-				ID:             fmt.Sprintf("%v", pr.ID),
-				Number:         int(pr.Number),
-				Title:          string(pr.Title),
-				URL:            string(pr.URL),
-				Repo:           string(pr.Repository.Name),
-				Org:            string(pr.Repository.Owner.Login),
-				Author:         string(pr.Author.Login),
-				CreatedAt:      pr.CreatedAt.Time,
-				UpdatedAt:      pr.UpdatedAt.Time,
-				CheckStatus:    checkStatus,
-				CheckRuns:      nil,
-				ReviewDecision: string(pr.ReviewDecision),
-				IsDraft:        bool(pr.IsDraft),
-				TotalComments:  int(pr.TotalCommentsCount),
-				TotalThreads:   int(pr.ReviewThreads.TotalCount),
-				Mergeable:      string(pr.Mergeable),
-				HeadRefName:    string(pr.HeadRefName),
+				ID:                fmt.Sprintf("%v", pr.ID),
+				Number:            int(pr.Number),
+				Title:             string(pr.Title),
+				URL:               string(pr.URL),
+				Repo:              string(pr.Repository.Name),
+				Org:               string(pr.Repository.Owner.Login),
+				Author:            string(pr.Author.Login),
+				CreatedAt:         pr.CreatedAt.Time,
+				UpdatedAt:         pr.UpdatedAt.Time,
+				CheckStatus:       checkStatus,
+				CheckRuns:         nil,
+				ReviewDecision:    string(pr.ReviewDecision),
+				IsDraft:           bool(pr.IsDraft),
+				TotalComments:     int(pr.TotalCommentsCount),
+				UnresolvedThreads: countUnresolved(pr.ReviewThreads.Nodes, int(pr.ReviewThreads.TotalCount)),
+				TotalThreads:      int(pr.ReviewThreads.TotalCount),
+				Mergeable:         string(pr.Mergeable),
+				HeadRefName:       string(pr.HeadRefName),
 			})
 		}
 

@@ -27,9 +27,11 @@ var (
 	ageColStyle    = lipgloss.NewStyle().Width(6)
 
 	// Header and footer
-	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#BD93F9")).MarginBottom(1).MarginLeft(1)
-	footerStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).MarginTop(1).MarginLeft(1)
-	columnHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true)
+	headerStyle             = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#BD93F9")).MarginBottom(1).MarginLeft(1)
+	footerStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).MarginTop(1).MarginLeft(1)
+	columnHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true)
+	activeColumnHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9")).Bold(true)
+	sortBadgeStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9")).Bold(true)
 
 	// Tree connectors for expanded check runs
 	treeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
