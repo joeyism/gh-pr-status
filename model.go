@@ -135,7 +135,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y", "enter":
 				action := m.confirmAction
 				m.confirmAction = ""
-				pr := v.prs[v.cursor]
+				pr, ok := v.focusedParentPR()
+				if !ok {
+					return m, nil
+				}
 				switch action {
 				case "cursor":
 					return m, m.addCommentCmd(pr.ID, "@cursor review")
@@ -190,24 +193,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if v.cursor > 0 {
 				v.cursor--
-				if v.cursor < v.scrollOffset {
-					v.scrollOffset = v.cursor
-				}
+				m.adjustScroll()
 			}
 		case "down", "j":
-			if v.cursor < len(v.prs)-1 {
+			rows := buildFocusRows(v)
+			if v.cursor < len(rows)-1 {
 				v.cursor++
 				m.adjustScroll()
 			}
 		case "tab":
-			if len(v.prs) > 0 {
-				pr := v.prs[v.cursor]
-				v.expanded[pr.Number] = !v.expanded[pr.Number]
-				if v.expanded[pr.Number] && m.viewMode == 1 && pr.CheckRuns == nil {
-					return m, m.fetchCheckRunsCmd(pr.ID, pr.Number)
-				}
-				m.adjustScroll()
+			rows := buildFocusRows(v)
+			if len(rows) == 0 {
+				break
 			}
+			if v.cursor < 0 {
+				v.cursor = 0
+			}
+			if v.cursor >= len(rows) {
+				v.cursor = len(rows) - 1
+			}
+			pr, ok := parentPR(v.prs, rows, v.cursor)
+			if !ok {
+				break
+			}
+			before := rows
+			old := v.cursor
+			v.expanded[pr.Number] = !v.expanded[pr.Number]
+			after := buildFocusRows(v)
+			v.cursor = remapFocusIndex(before, old, after)
+			if v.expanded[pr.Number] && m.viewMode == 1 {
+				for _, p := range v.prs {
+					if p.Number == pr.Number && p.CheckRuns == nil {
+						m.adjustScroll()
+						return m, m.fetchCheckRunsCmd(p.ID, p.Number)
+					}
+				}
+			}
+			m.adjustScroll()
 		case "s":
 			if m.confirmAction == "" {
 				m.sortMenuOpen = true
@@ -215,31 +237,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sortMenuCursor = indexOfSortField(v.sortField)
 			}
 		case "o":
-			if len(v.prs) > 0 {
-				return m, openBrowserCmd(v.prs[v.cursor].URL)
+			if u := openURLForFocus(v.prs, buildFocusRows(v), v.cursor); u != "" {
+				return m, openBrowserCmd(u)
 			}
 		case "c":
-			if m.viewMode == 0 && len(v.prs) > 0 {
-				m.confirmAction = "cursor"
+			if m.viewMode == 0 {
+				if _, ok := v.focusedParentPR(); ok {
+					m.confirmAction = "cursor"
+				}
 			}
 		case "x":
-			if m.viewMode == 0 && len(v.prs) > 0 {
-				m.confirmAction = "close"
+			if m.viewMode == 0 {
+				if _, ok := v.focusedParentPR(); ok {
+					m.confirmAction = "close"
+				}
 			}
 		case "m":
-			if m.viewMode == 0 && len(v.prs) > 0 {
-				m.confirmAction = "merge"
+			if m.viewMode == 0 {
+				if _, ok := v.focusedParentPR(); ok {
+					m.confirmAction = "merge"
+				}
 			}
 		case "p":
-			if m.viewMode == 1 && len(v.prs) > 0 {
-				pr := v.prs[v.cursor]
-				if pr.Author != m.username {
+			if m.viewMode == 1 {
+				if pr, ok := v.focusedParentPR(); ok && pr.Author != m.username {
 					m.confirmAction = "approve"
 				}
 			}
 		case "d":
-			if m.viewMode == 0 && len(v.prs) > 0 {
-				m.confirmAction = "draft"
+			if m.viewMode == 0 {
+				if _, ok := v.focusedParentPR(); ok {
+					m.confirmAction = "draft"
+				}
 			}
 		case "r":
 			if !v.fetching {
@@ -250,12 +279,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.fetchPRsCmd()
 			}
 		case "y":
-			if len(v.prs) > 0 {
-				return m, copyToClipboardCmd(v.prs[v.cursor].URL)
+			// Same URL resolution as `o`: check permalink/details when focused
+			// on a check; PR URL when focused on a PR row.
+			if u := openURLForFocus(v.prs, buildFocusRows(v), v.cursor); u != "" {
+				return m, copyToClipboardCmd(u)
 			}
 		case "b":
-			if len(v.prs) > 0 && v.prs[v.cursor].HeadRefName != "" {
-				return m, copyToClipboardCmd(v.prs[v.cursor].HeadRefName)
+			if pr, ok := v.focusedParentPR(); ok && pr.HeadRefName != "" {
+				return m, copyToClipboardCmd(pr.HeadRefName)
 			}
 		case "a":
 			m.viewMode = 1 - m.viewMode
@@ -357,11 +388,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.mine.previousStatus[pr.Number] = newKey
 		}
-		// Capture selected PR from the *old* slice before replacing it, so
-		// sortPRs can move the cursor to the new index of the same PR.
-		selected, keep := selectedPRNumber(&m.mine)
+		// Capture focus identity from the *old* slice before replacing it.
+		before := buildFocusRows(&m.mine)
+		oldCursor := m.mine.cursor
 		m.mine.prs = msg.prs
-		m.sortPRs(&m.mine, selected, keep)
+		m.resortPreservingFocus(&m.mine, before, oldCursor)
 		if statusChanged {
 			return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
 		}
@@ -376,17 +407,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.org.err = nil
 		now := time.Now()
 		m.org.lastUpdated = now
-		selected, keep := selectedPRNumber(&m.org)
+		before := buildFocusRows(&m.org)
+		oldCursor := m.org.cursor
 		m.org.prs = msg.prs
-		m.sortPRs(&m.org, selected, keep)
+		m.resortPreservingFocus(&m.org, before, oldCursor)
 
 	case checkRunsFetchedMsg:
+		before := buildFocusRows(&m.org)
+		oldCursor := m.org.cursor
 		for i, pr := range m.org.prs {
 			if pr.Number == msg.prNumber {
 				m.org.prs[i].CheckRuns = msg.runs
 				break
 			}
 		}
+		m.org.cursor = remapFocusIndex(before, oldCursor, buildFocusRows(&m.org))
 		m.adjustScroll()
 
 	case tickMsg:
@@ -415,76 +450,76 @@ func (m *model) adjustScroll() {
 }
 
 func (m *model) adjustScrollFor(v *viewState) {
-	if len(v.prs) == 0 {
+	rows := buildFocusRows(v)
+	if len(rows) == 0 {
+		v.cursor = 0
+		v.scrollOffset = 0
 		return
+	}
+	if v.cursor < 0 {
+		v.cursor = 0
+	}
+	if v.cursor >= len(rows) {
+		v.cursor = len(rows) - 1
 	}
 	visibleLines := m.height - 9 // Budget for header, colheader, footer, border
 	if visibleLines <= 0 {
 		return
 	}
-
-	if v.cursor < v.scrollOffset {
-		v.scrollOffset = v.cursor
-		return
+	if v.scrollOffset < 0 {
+		v.scrollOffset = 0
 	}
-
-	for {
-		linesConsumed := 0
-		found := false
-		for i := v.scrollOffset; i < len(v.prs); i++ {
-			itemHeight := 1
-			if v.expanded[v.prs[i].Number] {
-				itemHeight += len(v.prs[i].CheckRuns)
-				if len(v.prs[i].CheckRuns) == 0 {
-					itemHeight++
-				}
-			}
-			if i == v.cursor {
-				if linesConsumed+itemHeight <= visibleLines {
-					found = true
-				}
-				break
-			}
-			linesConsumed += itemHeight
-			if linesConsumed >= visibleLines {
-				break
-			}
-		}
-
-		if found || v.scrollOffset >= v.cursor {
-			break
-		}
-		v.scrollOffset++
+	if v.scrollOffset > v.cursor {
+		v.scrollOffset = v.cursor
+	}
+	if v.cursor >= v.scrollOffset+visibleLines {
+		v.scrollOffset = v.cursor - visibleLines + 1
 	}
 }
 
-// selectedPRNumber returns the Number of the PR at the cursor, or (0, false)
-// if the list is empty.
+// focusedParentPR returns the PR owning the focused row, or false if none.
+func (v *viewState) focusedParentPR() (PullRequest, bool) {
+	return parentPR(v.prs, buildFocusRows(v), v.cursor)
+}
+
+// selectedPRNumber returns the Number of the PR owning the focused row, or
+// (0, false) if the list is empty / cursor invalid.
 func selectedPRNumber(v *viewState) (int, bool) {
-	if len(v.prs) == 0 || v.cursor < 0 || v.cursor >= len(v.prs) {
+	pr, ok := v.focusedParentPR()
+	if !ok {
 		return 0, false
 	}
-	return v.prs[v.cursor].Number, true
+	return pr.Number, true
 }
 
-// sortPRs sorts v.prs in place by v.sortField/v.sortDir with stable tiebreaks.
-// If keepSelection is true, the cursor is moved to the new index of the PR
-// whose Number matches selectedNumber (clamped to last if not found).
-// Empty/single-element slices are no-ops.
+// sortPRs sorts v.prs in place by v.sortField/v.sortDir with stable tiebreaks
+// and remaps the focus cursor by identity.
+// selectedNumber is unused (kept for call-site compatibility); keepSelection
+// still triggers identity remap from the pre-sort focus row.
 func (m *model) sortPRs(v *viewState, selectedNumber int, keepSelection bool) {
+	_ = selectedNumber
+	before := buildFocusRows(v)
+	oldCursor := v.cursor
+	if len(v.prs) <= 1 {
+		v.cursor = 0
+		m.adjustScrollFor(v)
+		return
+	}
+	_ = keepSelection
+	sortPRsSlice(v.prs, v.sortField, v.sortDir)
+	v.cursor = remapFocusIndex(before, oldCursor, buildFocusRows(v))
+	m.adjustScrollFor(v)
+}
+
+// resortPreservingFocus sorts v.prs and remaps cursor from a pre-mutation row snapshot.
+func (m *model) resortPreservingFocus(v *viewState, before []focusRow, oldCursor int) {
 	if len(v.prs) <= 1 {
 		v.cursor = 0
 		m.adjustScrollFor(v)
 		return
 	}
 	sortPRsSlice(v.prs, v.sortField, v.sortDir)
-	if keepSelection {
-		idx := findPRIndexByNumber(v.prs, selectedNumber)
-		if idx < 0 {
-			idx = len(v.prs) - 1
-		}
-		v.cursor = idx
-	}
+	v.cursor = remapFocusIndex(before, oldCursor, buildFocusRows(v))
 	m.adjustScrollFor(v)
 }
 
@@ -549,86 +584,91 @@ func (m model) View() string {
 		b.WriteString("\n\n")
 
 		visibleLines := m.height - 9
-		linesConsumed := 0
+		rows := buildFocusRows(v)
+		treeIndent := "   " + strings.Repeat(" ", repoWidth) + " "
+		if m.viewMode == 1 {
+			treeIndent += strings.Repeat(" ", authorWidth) + " "
+		}
 
-		for i := v.scrollOffset; i < len(v.prs); i++ {
-			pr := v.prs[i]
+		linesConsumed := 0
+		for ri := v.scrollOffset; ri < len(rows) && linesConsumed < visibleLines; ri++ {
+			row := rows[ri]
+			pr := v.prs[row.PRIndex]
+			selected := ri == v.cursor
 			cursor := "   "
-			if i == v.cursor {
+			if selected {
 				cursor = cursorStyle.Render("┃") + "  "
 			}
 
-			prTitle := pr.Title
-			if pr.IsDraft {
-				prTitle = "DRAFT " + prTitle
-			}
-			if len(prTitle) > 48 {
-				prTitle = prTitle[:47] + "…"
-			}
-			titleRendered := titleColStyle.Render(prTitle)
-			if pr.IsDraft {
-				titleRendered = titleColStyle.Foreground(lipgloss.Color("240")).Italic(true).Render(prTitle)
-			}
-
-			authorPart := ""
-			if m.viewMode == 1 {
-				authorPart = dynAuthorStyle.Render(pr.Author) + " "
-			}
-
-			datePart := " " + ageColStyle.Render(formatAge(pr.UpdatedAt)) + " " + ageColStyle.Render(formatAge(pr.CreatedAt))
-			line := fmt.Sprintf("%s%s %s%s %s %s %s%s %s",
-				cursor,
-				dynRepoStyle.Render(pr.Repo),
-				authorPart,
-				titleRendered,
-				ciColStyle.Render(formatCIStatus(pr.CheckStatus)),
-				reviewColStyle.Render(formatReviewStatus(pr.ReviewDecision)),
-				mergeColStyle.Render(formatMergeable(pr.Mergeable)),
-				datePart,
-				formatComments(pr.TotalComments, pr.UnresolvedThreads, pr.TotalThreads),
-			)
-
-			if i == v.cursor {
-				line = selectedStyle.Render(line)
-			}
-
-			if t, ok := v.changedAt[pr.Number]; ok && now.Sub(t) < 3*time.Second {
-				if pr.CheckStatus == "SUCCESS" {
-					line = flashSuccessStyle.Render(line)
-				} else if pr.CheckStatus == "FAILURE" || pr.CheckStatus == "ERROR" {
-					line = flashFailureStyle.Render(line)
+			switch row.Kind {
+			case focusPR:
+				prTitle := pr.Title
+				if pr.IsDraft {
+					prTitle = "DRAFT " + prTitle
 				}
-			}
+				if len(prTitle) > 48 {
+					prTitle = prTitle[:47] + "…"
+				}
+				titleRendered := titleColStyle.Render(prTitle)
+				if pr.IsDraft {
+					titleRendered = titleColStyle.Foreground(lipgloss.Color("240")).Italic(true).Render(prTitle)
+				}
 
-			b.WriteString(line + "\n")
-			linesConsumed++
-
-			if v.expanded[pr.Number] {
-				treeIndent := "   " + strings.Repeat(" ", repoWidth) + " "
+				authorPart := ""
 				if m.viewMode == 1 {
-					treeIndent += strings.Repeat(" ", authorWidth) + " "
+					authorPart = dynAuthorStyle.Render(pr.Author) + " "
 				}
-				if pr.CheckRuns == nil && m.viewMode == 1 {
-					b.WriteString(treeIndent + treeStyle.Render("└─") + " " + dimStyle.Render("loading check runs...") + "\n")
-					linesConsumed++
-				} else if len(pr.CheckRuns) == 0 {
-					b.WriteString(treeIndent + treeStyle.Render("└─") + " " + dimStyle.Render("no check runs") + "\n")
-					linesConsumed++
-				} else {
-					for j, cr := range pr.CheckRuns {
-						branch := "├─"
-						if j == len(pr.CheckRuns)-1 {
-							branch = "└─"
-						}
-						b.WriteString(treeIndent + treeStyle.Render(branch) + " " + formatCheckRun(cr) + "\n")
-						linesConsumed++
+
+				datePart := " " + ageColStyle.Render(formatAge(pr.UpdatedAt)) + " " + ageColStyle.Render(formatAge(pr.CreatedAt))
+				line := fmt.Sprintf("%s%s %s%s %s %s %s%s %s",
+					cursor,
+					dynRepoStyle.Render(pr.Repo),
+					authorPart,
+					titleRendered,
+					ciColStyle.Render(formatCIStatus(pr.CheckStatus)),
+					reviewColStyle.Render(formatReviewStatus(pr.ReviewDecision)),
+					mergeColStyle.Render(formatMergeable(pr.Mergeable)),
+					datePart,
+					formatComments(pr.TotalComments, pr.UnresolvedThreads, pr.TotalThreads),
+				)
+
+				if selected {
+					line = selectedStyle.Render(line)
+				}
+
+				if t, ok := v.changedAt[pr.Number]; ok && now.Sub(t) < 3*time.Second {
+					if pr.CheckStatus == "SUCCESS" {
+						line = flashSuccessStyle.Render(line)
+					} else if pr.CheckStatus == "FAILURE" || pr.CheckStatus == "ERROR" {
+						line = flashFailureStyle.Render(line)
 					}
 				}
-			}
+				b.WriteString(line + "\n")
 
-			if linesConsumed >= visibleLines {
-				break
+			case focusCheck:
+				branch := "├─"
+				if isLastCheckRow(rows, ri) {
+					branch = "└─"
+				}
+				cr := pr.CheckRuns[row.CheckIndex]
+				line := cursor + treeIndent[3:] + treeStyle.Render(branch) + " " + formatCheckRun(cr)
+				if selected {
+					line = selectedStyle.Render(line)
+				}
+				b.WriteString(line + "\n")
+
+			case focusPlaceholder:
+				text := "no check runs"
+				if row.Placeholder == placeholderLoading {
+					text = "loading check runs..."
+				}
+				line := cursor + treeIndent[3:] + treeStyle.Render("└─") + " " + dimStyle.Render(text)
+				if selected {
+					line = selectedStyle.Render(line)
+				}
+				b.WriteString(line + "\n")
 			}
+			linesConsumed++
 		}
 	}
 
@@ -665,8 +705,11 @@ func (m model) View() string {
 	}
 	out = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(borderColor).Width(innerW).Height(innerH).Render(out)
 
-	if m.confirmAction != "" && len(v.prs) > 0 {
-		pr := v.prs[v.cursor]
+	if m.confirmAction != "" {
+		pr, ok := v.focusedParentPR()
+		if !ok {
+			return out
+		}
 		title := pr.Title
 		if len(title) > 40 {
 			title = title[:39] + "…"
@@ -782,6 +825,24 @@ func (m model) renderColumnHeader(v *viewState, repoWidth, authorWidth int) stri
 		}
 	}
 	return b.String()
+}
+
+// isLastCheckRow reports whether rows[i] is the last focusCheck under its PR
+// (so the tree connector should be └─ rather than ├─).
+func isLastCheckRow(rows []focusRow, i int) bool {
+	if i < 0 || i >= len(rows) || rows[i].Kind != focusCheck {
+		return false
+	}
+	prNum := rows[i].PRNumber
+	for j := i + 1; j < len(rows); j++ {
+		if rows[j].PRNumber != prNum {
+			return true
+		}
+		if rows[j].Kind == focusCheck {
+			return false
+		}
+	}
+	return true
 }
 
 func formatCIStatus(status string) string {

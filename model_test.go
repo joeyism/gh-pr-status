@@ -865,3 +865,596 @@ func TestSortMenuOverlay_ConfirmWins(t *testing.T) {
 	}
 }
 
+// --- Navigable check runs ---
+
+func keyRune(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func keyTab() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyTab}
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	in := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b {
+			in = true
+			continue
+		}
+		if in {
+			if (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') {
+				in = false
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func TestScroll_LongCheckListReachesLastCheck(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 15 // visibleLines = 6
+	runs := make([]CheckRun, 20)
+	for i := range runs {
+		runs[i] = CheckRun{Name: fmt.Sprintf("job-%02d", i)}
+	}
+	m.mine.prs = []PullRequest{
+		{Number: 1, Title: "big", CheckRuns: runs},
+		{Number: 2, Title: "next"},
+	}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 0
+	m.mine.scrollOffset = 0
+
+	for i := 0; i < 20; i++ {
+		nm, _ := m.Update(keyRune('j'))
+		m = nm.(model)
+	}
+	rows := buildFocusRows(&m.mine)
+	if m.mine.cursor != 20 {
+		t.Fatalf("cursor=%d want 20 (last check); rows=%d", m.mine.cursor, len(rows))
+	}
+	if m.mine.cursor < m.mine.scrollOffset {
+		t.Fatalf("cursor above viewport")
+	}
+	vis := m.height - 9
+	if m.mine.cursor >= m.mine.scrollOffset+vis {
+		t.Fatalf("cursor=%d scroll=%d vis=%d not visible", m.mine.cursor, m.mine.scrollOffset, vis)
+	}
+}
+
+func TestScroll_UpFromDeepCheckScrollsBack(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 15
+	runs := make([]CheckRun, 15)
+	for i := range runs {
+		runs[i] = CheckRun{Name: fmt.Sprintf("j%d", i)}
+	}
+	m.mine.prs = []PullRequest{{Number: 1, CheckRuns: runs}}
+	m.mine.expanded[1] = true
+	for i := 0; i < 15; i++ {
+		nm, _ := m.Update(keyRune('j'))
+		m = nm.(model)
+	}
+	for m.mine.cursor > 0 {
+		nm, _ := m.Update(keyRune('k'))
+		m = nm.(model)
+	}
+	if m.mine.scrollOffset != 0 {
+		t.Fatalf("scrollOffset=%d want 0 at top", m.mine.scrollOffset)
+	}
+}
+
+func TestAdjustScrollFor_RowBasedDeepCheck(t *testing.T) {
+	m := model{
+		height: 11, // vis=2
+		mine: viewState{
+			prs: []PullRequest{{
+				Number: 1,
+				CheckRuns: []CheckRun{
+					{Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"}, {Name: "e"},
+				},
+			}},
+			expanded:     map[int]bool{1: true},
+			cursor:       5, // last check
+			scrollOffset: 0,
+		},
+	}
+	m.adjustScrollFor(&m.mine)
+	if m.mine.scrollOffset == 0 {
+		t.Fatal("expected scrollOffset > 0 for deep check with small viewport")
+	}
+	if m.mine.cursor < m.mine.scrollOffset {
+		t.Fatal("cursor not in viewport")
+	}
+}
+
+func TestJK_WalksIntoExpandedChecks(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "build"}, {Name: "test"}}},
+		{Number: 2, CheckRuns: []CheckRun{{Name: "lint"}}},
+	}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 0
+
+	nm, _ := m.Update(keyRune('j'))
+	m = nm.(model)
+	rows := buildFocusRows(&m.mine)
+	if rows[m.mine.cursor].Kind != focusCheck || rows[m.mine.cursor].CheckName != "build" {
+		t.Fatalf("after j: %+v", rows[m.mine.cursor])
+	}
+	nm, _ = m.Update(keyRune('j'))
+	m = nm.(model)
+	rows = buildFocusRows(&m.mine)
+	if rows[m.mine.cursor].CheckName != "test" {
+		t.Fatalf("second j: %+v", rows[m.mine.cursor])
+	}
+	nm, _ = m.Update(keyRune('j'))
+	m = nm.(model)
+	rows = buildFocusRows(&m.mine)
+	if rows[m.mine.cursor].Kind != focusPR || rows[m.mine.cursor].PRNumber != 2 {
+		t.Fatalf("third j should be PR2: %+v", rows[m.mine.cursor])
+	}
+}
+
+func TestJK_ClampsAtEnds(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{Number: 1, CheckRuns: []CheckRun{{Name: "a"}}}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 0
+	nm, _ := m.Update(keyRune('k'))
+	m = nm.(model)
+	if m.mine.cursor != 0 {
+		t.Fatalf("k at top: %d", m.mine.cursor)
+	}
+	nm, _ = m.Update(keyRune('j'))
+	m = nm.(model)
+	nm, _ = m.Update(keyRune('j'))
+	m = nm.(model)
+	if m.mine.cursor != 1 {
+		t.Fatalf("j past end: %d want 1", m.mine.cursor)
+	}
+}
+
+func TestJK_MultiExpandInterleaves(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "a"}}},
+		{Number: 2, CheckRuns: []CheckRun{{Name: "b"}}},
+	}
+	m.mine.expanded[1] = true
+	m.mine.expanded[2] = true
+	for i, wantKind := range []focusKind{focusPR, focusCheck, focusPR, focusCheck} {
+		rows := buildFocusRows(&m.mine)
+		if rows[m.mine.cursor].Kind != wantKind {
+			t.Fatalf("step %d: got %+v want kind %v", i, rows[m.mine.cursor], wantKind)
+		}
+		if i < 3 {
+			nm, _ := m.Update(keyRune('j'))
+			m = nm.(model)
+		}
+	}
+}
+
+func TestTab_ExpandCollapse_FromPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{Number: 5, CheckRuns: []CheckRun{{Name: "x"}}}}
+	m.mine.cursor = 0
+	nm, _ := m.Update(keyTab())
+	m = nm.(model)
+	if !m.mine.expanded[5] {
+		t.Fatal("expected expanded")
+	}
+	if len(buildFocusRows(&m.mine)) != 2 {
+		t.Fatal("expected PR+check rows")
+	}
+	if buildFocusRows(&m.mine)[m.mine.cursor].Kind != focusPR {
+		t.Fatal("tab expand should keep focus on PR row")
+	}
+	nm, _ = m.Update(keyTab())
+	m = nm.(model)
+	if m.mine.expanded[5] {
+		t.Fatal("expected collapsed")
+	}
+	if len(buildFocusRows(&m.mine)) != 1 {
+		t.Fatal("only PR row")
+	}
+}
+
+func TestTab_CollapseWhileOnCheck_SnapsToParentPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "a"}, {Name: "b"}}},
+		{Number: 2},
+	}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 2 // check b
+	nm, _ := m.Update(keyTab())
+	m = nm.(model)
+	if m.mine.expanded[1] {
+		t.Fatal("should collapse parent")
+	}
+	rows := buildFocusRows(&m.mine)
+	if rows[m.mine.cursor].Kind != focusPR || rows[m.mine.cursor].PRNumber != 1 {
+		t.Fatalf("want parent PR1, got %+v cursor=%d", rows[m.mine.cursor], m.mine.cursor)
+	}
+}
+
+func TestTab_OnCheckTogglesParentNotNextPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "a"}}},
+		{Number: 2, CheckRuns: []CheckRun{{Name: "z"}}},
+	}
+	m.mine.expanded[1] = true
+	m.mine.expanded[2] = true
+	m.mine.cursor = 1 // check a under PR1
+	nm, _ := m.Update(keyTab())
+	m = nm.(model)
+	if m.mine.expanded[1] {
+		t.Fatal("PR1 should collapse")
+	}
+	if !m.mine.expanded[2] {
+		t.Fatal("PR2 should stay expanded")
+	}
+}
+
+func TestActions_OnCheckTargetParentPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.viewMode = 0
+	m.mine.prs = []PullRequest{{
+		Number: 1, URL: "https://pr/1", HeadRefName: "feat/x",
+		CheckRuns: []CheckRun{{Name: "build", Permalink: "https://check/build"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1 // on check
+
+	nm, _ := m.Update(keyRune('m'))
+	m = nm.(model)
+	if m.confirmAction != "merge" {
+		t.Fatalf("confirmAction=%q want merge", m.confirmAction)
+	}
+
+	m.confirmAction = ""
+	_, cmd := m.Update(keyRune('b'))
+	if cmd == nil {
+		t.Fatal("branch should copy parent HeadRefName")
+	}
+}
+
+func TestYankKey_CheckUsesCheckURL(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{
+		Number: 1, URL: "https://pr/1",
+		CheckRuns: []CheckRun{{Name: "build", Permalink: "https://check/build"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1 // on check
+
+	rows := buildFocusRows(&m.mine)
+	if u := openURLForFocus(m.mine.prs, rows, 1); u != "https://check/build" {
+		t.Fatalf("openURLForFocus=%q want check URL", u)
+	}
+	_, cmd := m.Update(keyRune('y'))
+	if cmd == nil {
+		t.Fatal("yank on check with URL should return cmd")
+	}
+}
+
+func TestYankKey_CheckWithoutURLNoCmd(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{
+		Number: 1, URL: "https://pr/1",
+		CheckRuns: []CheckRun{{Name: "build"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1
+	_, cmd := m.Update(keyRune('y'))
+	if cmd != nil {
+		t.Fatal("yank on check without URL should be no-op")
+	}
+}
+
+func TestYankKey_PRStillYanksPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.mine.prs = []PullRequest{{Number: 1, URL: "https://pr/1"}}
+	m.mine.cursor = 0
+	rows := buildFocusRows(&m.mine)
+	if u := openURLForFocus(m.mine.prs, rows, 0); u != "https://pr/1" {
+		t.Fatalf("got %q", u)
+	}
+	_, cmd := m.Update(keyRune('y'))
+	if cmd == nil {
+		t.Fatal("yank on PR should return cmd")
+	}
+}
+
+func TestActions_EmptyListNoPanic(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.mine.prs = nil
+	m.mine.cursor = 0
+	for _, r := range []rune{'o', 'y', 'b', 'm', 'c', 'x', 'd'} {
+		nm, _ := m.Update(keyRune(r))
+		m = nm.(model)
+	}
+}
+
+func TestApprove_OnCheckUsesParentAuthorGate(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.viewMode = 1
+	m.org.prs = []PullRequest{{
+		Number: 9, Author: "other",
+		CheckRuns: []CheckRun{{Name: "ci"}},
+	}}
+	m.org.expanded[9] = true
+	m.org.cursor = 1
+	nm, _ := m.Update(keyRune('p'))
+	if nm.(model).confirmAction != "approve" {
+		t.Fatal("approve should work from check focus on others' PR")
+	}
+
+	m.org.prs[0].Author = "user"
+	m.confirmAction = ""
+	m.org.cursor = 1
+	nm, _ = m.Update(keyRune('p'))
+	if nm.(model).confirmAction == "approve" {
+		t.Fatal("approve blocked for own PR even from check focus")
+	}
+}
+
+func TestOpenKey_CheckWithPermalinkReturnsCmd(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{
+		Number: 1, URL: "https://pr/1",
+		CheckRuns: []CheckRun{{Name: "build", Permalink: "https://github.com/o/r/runs/1"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1
+	_, cmd := m.Update(keyRune('o'))
+	if cmd == nil {
+		t.Fatal("expected open cmd")
+	}
+	rows := buildFocusRows(&m.mine)
+	if u := openURLForFocus(m.mine.prs, rows, 1); u != "https://github.com/o/r/runs/1" {
+		t.Fatalf("url=%q", u)
+	}
+}
+
+func TestOpenKey_CheckWithoutURLNoCmd(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{
+		Number: 1, URL: "https://pr/1",
+		CheckRuns: []CheckRun{{Name: "build"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1
+	_, cmd := m.Update(keyRune('o'))
+	if cmd != nil {
+		t.Fatal("expected no cmd when check has no URL")
+	}
+}
+
+func TestOpenKey_PRStillOpensPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.mine.prs = []PullRequest{{Number: 1, URL: "https://pr/1"}}
+	m.mine.cursor = 0
+	_, cmd := m.Update(keyRune('o'))
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if u := openURLForFocus(m.mine.prs, buildFocusRows(&m.mine), 0); u != "https://pr/1" {
+		t.Fatalf("%q", u)
+	}
+}
+
+func TestOpenKey_LoadingPlaceholderNoCmd(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.viewMode = 1
+	m.org.prs = []PullRequest{{Number: 1, URL: "https://pr/1", CheckRuns: nil}}
+	m.org.expanded[1] = true
+	m.org.cursor = 1
+	_, cmd := m.Update(keyRune('o'))
+	if cmd != nil {
+		t.Fatal("no open on placeholder")
+	}
+}
+
+func TestView_SelectedCheckShowsCheckName(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.width, m.height = 120, 40
+	m.mine.loading = false
+	m.mine.prs = []PullRequest{{
+		Number: 1, Repo: "r", Title: "t",
+		CheckRuns: []CheckRun{{Name: "unique-build-job", Status: "COMPLETED", Conclusion: "SUCCESS"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "unique-build-job") {
+		t.Fatalf("missing check name in view:\n%s", out)
+	}
+	if !strings.Contains(out, "t") {
+		t.Fatal("PR title missing")
+	}
+}
+
+func TestView_ScrollHidesOffscreenChecks(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.width, m.height = 120, 12 // small vis
+	m.mine.loading = false
+	runs := make([]CheckRun, 30)
+	for i := range runs {
+		runs[i] = CheckRun{Name: fmt.Sprintf("job-%02d", i), Status: "COMPLETED", Conclusion: "SUCCESS"}
+	}
+	m.mine.prs = []PullRequest{{Number: 1, Repo: "r", Title: "t", CheckRuns: runs}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 25
+	m.adjustScroll()
+	out := stripANSI(m.View())
+	if strings.Contains(out, "job-00") && m.mine.scrollOffset > 1 {
+		t.Fatalf("expected early jobs scrolled off; scroll=%d\n%s", m.mine.scrollOffset, out)
+	}
+	if !strings.Contains(out, "job-24") && !strings.Contains(out, "job-25") {
+		t.Fatalf("expected focused region visible\n%s", out)
+	}
+}
+
+func TestSortPRs_PreservesCheckFocus(t *testing.T) {
+	m := initialModel(nil, "user", nil, time.Minute, sortFieldNumber, sortAsc)
+	m.height = 40
+	m.mine.prs = []PullRequest{
+		{Number: 2, Title: "b", CheckRuns: []CheckRun{{Name: "x"}}},
+		{Number: 1, Title: "a", CheckRuns: []CheckRun{{Name: "keep-me"}}},
+	}
+	m.mine.expanded[1] = true
+	// rows: PR2, PR1, keep-me → focus keep-me index 2
+	m.mine.cursor = 2
+	m.mine.sortField = sortFieldNumber
+	m.mine.sortDir = sortAsc
+	m.sortPRs(&m.mine, 0, true)
+	rows := buildFocusRows(&m.mine)
+	if rows[m.mine.cursor].CheckName != "keep-me" {
+		t.Fatalf("lost check focus: cursor=%d row=%+v", m.mine.cursor, rows[m.mine.cursor])
+	}
+}
+
+func TestPRsFetched_PreservesCheckFocusWhenStillPresent(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, sortFieldNumber, sortAsc)
+	m.height = 40
+	m.mine.loading = false
+	m.mine.prs = []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "a"}, {Name: "b"}}},
+	}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 2 // b
+	nm, _ := m.Update(prsFetchedMsg{prs: []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "a"}, {Name: "b"}}},
+		{Number: 3},
+	}})
+	m = nm.(model)
+	rows := buildFocusRows(&m.mine)
+	if rows[m.mine.cursor].CheckName != "b" {
+		t.Fatalf("got %+v", rows[m.mine.cursor])
+	}
+}
+
+func TestCheckRunsFetched_LoadingFocusMovesToFirstCheck(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.viewMode = 1
+	m.org.prs = []PullRequest{{Number: 1, ID: "id", CheckRuns: nil}}
+	m.org.expanded[1] = true
+	m.org.cursor = 1 // loading placeholder
+	nm, _ := m.Update(checkRunsFetchedMsg{
+		prNumber: 1,
+		runs:     []CheckRun{{Name: "first"}, {Name: "second"}},
+	})
+	m = nm.(model)
+	rows := buildFocusRows(&m.org)
+	if rows[m.org.cursor].Kind != focusCheck || rows[m.org.cursor].CheckName != "first" {
+		t.Fatalf("got %+v", rows[m.org.cursor])
+	}
+}
+
+func TestCheckRunsFetched_EmptyStaysOnEmptyPlaceholder(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.viewMode = 1
+	m.org.prs = []PullRequest{{Number: 1, CheckRuns: nil}}
+	m.org.expanded[1] = true
+	m.org.cursor = 1
+	nm, _ := m.Update(checkRunsFetchedMsg{prNumber: 1, runs: []CheckRun{}})
+	m = nm.(model)
+	rows := buildFocusRows(&m.org)
+	if rows[m.org.cursor].Kind != focusPlaceholder || rows[m.org.cursor].Placeholder != placeholderEmpty {
+		t.Fatalf("got %+v", rows[m.org.cursor])
+	}
+}
+
+func TestEdge_DuplicateCheckNamesDistinctFocus(t *testing.T) {
+	v := &viewState{
+		prs: []PullRequest{{Number: 1, CheckRuns: []CheckRun{
+			{Name: "test"}, {Name: "test"},
+		}}},
+		expanded: map[int]bool{1: true},
+	}
+	rows := buildFocusRows(v)
+	if focusID(rows[1]) == focusID(rows[2]) {
+		t.Fatal("duplicate names must still have distinct focus IDs")
+	}
+}
+
+func TestEdge_SortMenuStealsKeys(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{
+		{Number: 1, CheckRuns: []CheckRun{{Name: "a"}}},
+		{Number: 2},
+	}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 0
+	m.sortMenuOpen = true
+	nm, _ := m.Update(keyRune('j'))
+	m = nm.(model)
+	if m.mine.cursor != 0 {
+		t.Fatal("list cursor must not move while sort menu open")
+	}
+}
+
+func TestEdge_OrgTabExpandFetchesWhenNil(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.viewMode = 1
+	m.org.prs = []PullRequest{{Number: 1, ID: "PR_id", CheckRuns: nil}}
+	m.org.cursor = 0
+	got, cmd := m.Update(keyTab())
+	mod := got.(model)
+	if !mod.org.expanded[1] {
+		t.Fatal("should be expanded")
+	}
+	if cmd == nil {
+		t.Fatal("expected fetch cmd when CheckRuns nil")
+	}
+}
+
+func TestEdge_MineTabExpandNoFetchWhenRunsPresent(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 40
+	m.mine.prs = []PullRequest{{Number: 1, CheckRuns: []CheckRun{{Name: "a"}}}}
+	m.mine.cursor = 0
+	_, cmd := m.Update(keyTab())
+	if cmd != nil {
+		t.Fatal("mine view with runs should not fetch")
+	}
+}
+
+func TestEdge_TinyHeightNoPanic(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.height = 5
+	m.width = 40
+	m.mine.loading = false
+	m.mine.prs = []PullRequest{{Number: 1, CheckRuns: []CheckRun{{Name: "a"}}}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1
+	m.adjustScroll()
+	_ = m.View()
+	nm, _ := m.Update(keyRune('j'))
+	_ = nm.View()
+}
+

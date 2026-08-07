@@ -50,6 +50,8 @@ type CheckRun struct {
 	Name       string
 	Status     string
 	Conclusion string
+	Permalink  string // preferred for open
+	DetailsURL string // fallback if Permalink empty
 }
 
 type PullRequest struct {
@@ -155,6 +157,8 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 												Name       githubv4.String
 												Status     githubv4.String
 												Conclusion githubv4.String
+												Permalink  githubv4.URI
+												DetailsURL githubv4.URI `graphql:"detailsUrl"`
 											} `graphql:"... on CheckRun"`
 										}
 									} `graphql:"contexts(first: 50)"`
@@ -196,6 +200,8 @@ func fetchPRs(ctx context.Context, client *githubv4.Client, username string, org
 						Name:       string(ctxNode.CheckRun.Name),
 						Status:     string(ctxNode.CheckRun.Status),
 						Conclusion: string(ctxNode.CheckRun.Conclusion),
+						Permalink:  ctxNode.CheckRun.Permalink.String(),
+						DetailsURL: ctxNode.CheckRun.DetailsURL.String(),
 					})
 				}
 			}
@@ -365,6 +371,8 @@ func fetchCheckRuns(ctx context.Context, client *githubv4.Client, prID string) (
 											Name       githubv4.String
 											Status     githubv4.String
 											Conclusion githubv4.String
+											Permalink  githubv4.URI
+											DetailsURL githubv4.URI `graphql:"detailsUrl"`
 										} `graphql:"... on CheckRun"`
 									}
 								} `graphql:"contexts(first: 50)"`
@@ -397,6 +405,8 @@ func fetchCheckRuns(ctx context.Context, client *githubv4.Client, prID string) (
 					Name:       string(ctxNode.CheckRun.Name),
 					Status:     string(ctxNode.CheckRun.Status),
 					Conclusion: string(ctxNode.CheckRun.Conclusion),
+					Permalink:  ctxNode.CheckRun.Permalink.String(),
+					DetailsURL: ctxNode.CheckRun.DetailsURL.String(),
 				})
 			}
 		}

@@ -28,10 +28,11 @@ By default it shows all open PRs authored by you. To scope results to specific o
 
 | Key | Action |
 |---|---|
-| `j` / `k` or arrow keys | Move cursor up/down |
-| `tab` | Expand/collapse check runs for selected PR |
+| `j` / `k` or arrow keys | Move cursor up/down across PRs and expanded check runs |
+| `tab` | Expand/collapse checks for the PR under the cursor (or parent PR if on a check) |
 | `s` | Open the sort menu (changes the sort for the current session only) |
-| `o` | Open selected PR in browser |
+| `o` | Open selected PR in browser, or the focused check run’s GitHub page |
+| `y` | Copy selected PR URL, or the focused check run’s URL, to the clipboard |
 | `r` | Force refresh |
 | `c` | Post `@cursor review` comment on selected PR |
 | `q` / `ctrl+c` | Quit |
