@@ -4,3 +4,5 @@ orgs:
 poll_interval: "30s"
 sort_by: "updated"
 sort_dir: "desc"
+# Optional interactive command run by Enter on a PR. ${PR_URL} is shell-quoted.
+# on_enter: 'gh code-review ${PR_URL}'

@@ -34,6 +34,7 @@ type prClosedMsg struct{ err error }
 type prMergedMsg struct{ err error }
 type prApprovedMsg struct{ err error }
 type clipboardMsg struct{ err error }
+type onEnterFinishedMsg struct{ err error }
 type draftToggledMsg struct {
 	err     error
 	isDraft bool // the new state after toggle
@@ -63,19 +64,20 @@ type model struct {
 	org      viewState
 	viewMode int // 0 = mine, 1 = org
 
-	focused       bool
-	confirmAction string  // "cursor" | "close" | "merge" | "approve" | "" (none)
-	sortMenuOpen  bool
-	sortMenuCursor int   // index into sortFieldOrder
-	sortMenuDir   sortDir
-	flash         string
-	width         int
-	height        int
+	focused        bool
+	confirmAction  string // "cursor" | "close" | "merge" | "approve" | "" (none)
+	sortMenuOpen   bool
+	sortMenuCursor int // index into sortFieldOrder
+	sortMenuDir    sortDir
+	flash          string
+	width          int
+	height         int
 
 	client       *githubv4.Client
 	username     string
 	orgs         []string
 	pollInterval time.Duration
+	onEnter      string
 }
 
 func (m *model) activeView() *viewState {
@@ -236,6 +238,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sortMenuDir = v.sortDir
 				m.sortMenuCursor = indexOfSortField(v.sortField)
 			}
+		case "enter":
+			if strings.TrimSpace(m.onEnter) == "" {
+				break
+			}
+			pr, ok := v.focusedParentPR()
+			if !ok || pr.URL == "" {
+				break
+			}
+			return m, onEnterExecCmd(expandOnEnter(m.onEnter, pr.URL))
 		case "o":
 			if u := openURLForFocus(v.prs, buildFocusRows(v), v.cursor); u != "" {
 				return m, openBrowserCmd(u)
@@ -368,6 +379,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flash = flashSuccessMsg.Render("Copied to clipboard ✓")
 		}
 		return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{} })
+
+	case onEnterFinishedMsg:
+		if msg.err != nil {
+			m.flash = flashFailureMsg.Render(fmt.Sprintf("on_enter failed: %v", msg.err))
+		}
+		v.fetching = true
+		if m.viewMode == 1 {
+			return m, m.fetchOrgPRsCmd()
+		}
+		return m, m.fetchPRsCmd()
 
 	case prsFetchedMsg:
 		m.mine.fetching = false
@@ -688,6 +709,9 @@ func (m model) View() string {
 	help := "j/k: nav • tab: expand • s: sort • o: open • y: yank • b: branch • r: refresh • c: review • d: draft • x: close • m: merge • a: org view • q: quit"
 	if m.viewMode == 1 {
 		help = "j/k: nav • tab: expand • s: sort • o: open • y: yank • b: branch • r: refresh • p: approve • a: my prs • q: quit"
+	}
+	if strings.TrimSpace(m.onEnter) != "" {
+		help = "enter: run • " + help
 	}
 	b.WriteString(footerStyle.Render(fmt.Sprintf("\n%s%s%s                    %s", ago, fetchIndicator, flashLine, help)))
 

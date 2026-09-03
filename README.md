@@ -35,6 +35,7 @@ By default it shows all open PRs authored by you. To scope results to specific o
 | `y` | Copy selected PR URL, or the focused check run’s URL, to the clipboard |
 | `r` | Force refresh |
 | `c` | Post `@cursor review` comment on selected PR |
+| `enter` | Run the configured `on_enter` command for the selected PR, if set |
 | `q` / `ctrl+c` | Quit |
 
 Inside the sort menu: `j`/`k` (or arrow keys) to move, `tab` to toggle
@@ -59,6 +60,7 @@ sort_dir: "desc"
 | `poll_interval` | How often to refresh (minimum `5s`) | `30s` |
 | `sort_by` | Initial sort field: `updated`, `created`, `repo`, `author`, `title`, `ci`, `review`, `merge`, `comments`, or `number` | `updated` |
 | `sort_dir` | Initial sort direction: `asc` or `desc` | `desc` |
+| `on_enter` | Optional interactive command run by Enter on the PR list. `${PR_URL}` is replaced with the parent PR URL, shell-quoted, then passed to `sh -c`. Unset or empty means Enter does nothing. | unset |
 
 The `sort_by` and `sort_dir` values only set the startup default. The in-app
 sort menu changes the sort for the current session; it does not write back to

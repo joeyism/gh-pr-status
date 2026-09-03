@@ -81,6 +81,134 @@ func TestUpdateYankKey(t *testing.T) {
 	})
 }
 
+func TestEnterKey_RunsOnEnterWhenConfigured(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.onEnter = "gh code-review ${PR_URL}"
+	m.mine.prs = []PullRequest{{Number: 1, Title: "PR 1", URL: "https://github.com/o/r/pull/1"}}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command when on_enter is set and a PR is focused")
+	}
+}
+
+func TestEnterKey_NoopWithoutUsableConfigOrPR(t *testing.T) {
+	cases := []struct {
+		name    string
+		onEnter string
+		prs     []PullRequest
+	}{
+		{"unset", "", []PullRequest{{Number: 1, URL: "https://pr/1"}}},
+		{"whitespace only", "   ", []PullRequest{{Number: 1, URL: "https://pr/1"}}},
+		{"empty list", "gh code-review ${PR_URL}", nil},
+		{"empty URL", "gh code-review ${PR_URL}", []PullRequest{{Number: 1}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+			m.onEnter = tc.onEnter
+			m.mine.prs = tc.prs
+			_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if cmd != nil {
+				t.Fatal("expected Enter to be a no-op")
+			}
+		})
+	}
+}
+
+func TestEnterKey_ConfirmAndSortOverlaysStillWin(t *testing.T) {
+	t.Run("confirm", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+		m.onEnter = "gh code-review ${PR_URL}"
+		m.mine.prs = []PullRequest{{Number: 1, URL: "https://pr/1"}}
+		m.confirmAction = "close"
+		newModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if newModel.(model).confirmAction != "" || cmd == nil {
+			t.Fatal("confirm Enter should clear the overlay and run close")
+		}
+	})
+
+	t.Run("sort menu", func(t *testing.T) {
+		m := initialModel(nil, "user", nil, 0, sortFieldUpdated, sortDesc)
+		m.onEnter = "gh code-review ${PR_URL}"
+		m.mine.prs = []PullRequest{{Number: 1, Repo: "z"}, {Number: 2, Repo: "a"}}
+		m.sortMenuOpen = true
+		m.sortMenuCursor = indexOfSortField(sortFieldRepo)
+		m.sortMenuDir = sortAsc
+		newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		mod := newModel.(model)
+		if mod.sortMenuOpen || mod.mine.sortField != sortFieldRepo {
+			t.Fatal("sort menu Enter should apply and close the menu")
+		}
+	})
+}
+
+func TestEnterKey_OnCheckUsesParentPR(t *testing.T) {
+	m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+	m.onEnter = "gh code-review ${PR_URL}"
+	m.mine.prs = []PullRequest{{
+		Number: 1, URL: "https://pr/1",
+		CheckRuns: []CheckRun{{Name: "build", Permalink: "https://check/build"}},
+	}}
+	m.mine.expanded[1] = true
+	m.mine.cursor = 1
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter on a check row should run the parent PR command")
+	}
+}
+
+func TestOnEnterFinished_RefreshesActiveView(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode int
+	}{
+		{"mine", 0},
+		{"org", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+			m.viewMode = tc.mode
+			newModel, cmd := m.Update(onEnterFinishedMsg{err: fmt.Errorf("exit 1")})
+			mod := newModel.(model)
+			if cmd == nil {
+				t.Fatal("expected refresh command")
+			}
+			if !mod.activeView().fetching {
+				t.Fatal("expected active view to be marked fetching")
+			}
+			if !strings.Contains(mod.flash, "on_enter failed") {
+				t.Fatalf("expected error flash, got %q", mod.flash)
+			}
+		})
+	}
+}
+
+func TestView_EnterHelpReflectsConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		onEnter string
+		want    bool
+	}{
+		{"configured", "gh code-review ${PR_URL}", true},
+		{"unset", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := initialModel(nil, "user", nil, 0, defaultSortField, defaultSortDir)
+			m.width, m.height = 200, 40
+			m.mine.loading = false
+			m.mine.prs = []PullRequest{{Number: 1, Title: "x", URL: "https://pr/1"}}
+			m.onEnter = tc.onEnter
+			view := m.View()
+			got := strings.Contains(view, "enter: run")
+			if got != tc.want {
+				t.Fatalf("enter help present = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBranchKey(t *testing.T) {
 	prs := []PullRequest{{Number: 1, Title: "PR 1", HeadRefName: "feature-branch"}}
 
@@ -443,7 +571,7 @@ func TestAdjustScrollFor_TargetsGivenView(t *testing.T) {
 			cursor:       4,
 			scrollOffset: 0,
 		},
-		viewMode: 0, // activeView() == mine
+		viewMode: 0,  // activeView() == mine
 		height:   11, // visibleLines = 11-9 = 2; 5 PRs must scroll
 	}
 	m.adjustScrollFor(&m.org)
@@ -719,7 +847,7 @@ func TestOrgPRsFetchedMsg_SortsAndFollowsCursor(t *testing.T) {
 	mod, _ := m.Update(orgPRsFetchedMsg{prs: newPRs})
 	got := mod.(model)
 	// CI desc: #2 (FAILURE), #3 (PENDING), #1 (SUCCESS).
-		if got.org.prs[0].Number != 2 || got.org.prs[1].Number != 3 || got.org.prs[2].Number != 1 {
+	if got.org.prs[0].Number != 2 || got.org.prs[1].Number != 3 || got.org.prs[2].Number != 1 {
 		t.Errorf("org fetched order: got [%d,%d,%d], want [2,3,1] (CI desc)",
 			got.org.prs[0].Number, got.org.prs[1].Number, got.org.prs[2].Number)
 	}
@@ -1457,4 +1585,3 @@ func TestEdge_TinyHeightNoPanic(t *testing.T) {
 	nm, _ := m.Update(keyRune('j'))
 	_ = nm.View()
 }
-

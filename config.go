@@ -21,6 +21,7 @@ type Config struct {
 	PollInterval string   `yaml:"poll_interval"`
 	SortBy       string   `yaml:"sort_by"`
 	SortDir      string   `yaml:"sort_dir"`
+	OnEnter      string   `yaml:"on_enter"`
 }
 
 // PollDuration returns the effective polling interval after applying defaults.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -45,6 +46,7 @@ func main() {
 
 	sortField, sortDir := cfg.SortConfig()
 	m := initialModel(client, username, cfg.Orgs, cfg.PollDuration(), sortField, sortDir)
+	m.onEnter = strings.TrimSpace(cfg.OnEnter)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithReportFocus())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)

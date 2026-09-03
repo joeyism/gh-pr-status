@@ -28,11 +28,11 @@ func TestConfigSortConfig(t *testing.T) {
 			wantDir:   sortAsc,
 		},
 		{
-			name:        "invalid sort_by falls back to default with warning",
-			cfg:         Config{SortBy: "bogus", SortDir: "asc"},
-			wantField:   defaultSortField,
-			wantDir:     sortAsc,
-			wantWarnBy:  "bogus",
+			name:       "invalid sort_by falls back to default with warning",
+			cfg:        Config{SortBy: "bogus", SortDir: "asc"},
+			wantField:  defaultSortField,
+			wantDir:    sortAsc,
+			wantWarnBy: "bogus",
 		},
 		{
 			name:        "invalid sort_dir falls back to default with warning",
@@ -81,6 +81,35 @@ func TestConfigSortConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadConfigOnEnter(t *testing.T) {
+	t.Run("absent field is empty", func(t *testing.T) {
+		path := t.TempDir() + "/config.yaml"
+		if err := os.WriteFile(path, []byte("orgs: [acme]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OnEnter != "" {
+			t.Fatalf("OnEnter = %q, want empty", cfg.OnEnter)
+		}
+	})
+	t.Run("reads on_enter", func(t *testing.T) {
+		path := t.TempDir() + "/config.yaml"
+		if err := os.WriteFile(path, []byte("on_enter: 'gh code-review ${PR_URL}'\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OnEnter != "gh code-review ${PR_URL}" {
+			t.Fatalf("OnEnter = %q", cfg.OnEnter)
+		}
+	})
 }
 
 func captureStderr(t *testing.T, fn func()) string {
