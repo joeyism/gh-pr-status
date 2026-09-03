@@ -52,6 +52,7 @@ orgs:
 poll_interval: "30s"
 sort_by: "updated"
 sort_dir: "desc"
+on_enter: 'gh code-review ${PR_URL}'
 ```
 
 | Field | Description | Default |
